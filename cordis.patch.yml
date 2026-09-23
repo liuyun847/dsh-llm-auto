@@ -11,6 +11,15 @@
 #   name          模型显示名,默认 `Auto`(选择器里出现的是 `Auto` 分组 + 这个模型名)。
 #   contextWindow 对外宣称的上下文窗口;不写则取**第一条可解析路由**的窗口,取不到用保守值 65536。
 #   logLimit      路由日志环形缓冲条数,默认 50(仅内存,重启即清空)。
+#   retry         路由内重试策略,形状与官方 retryPolicy 相同(只支持 mode: 'normal'):
+#                   maxRetries      每路由最多重试几次(不含首次),默认 5(对齐官方 dsh-llm-retry);
+#                                  0 = 关闭重试,恢复"一次败就切"的旧行为。
+#                   retryableCodes  可重试的错误码白名单,默认 EMPTY_RESPONSE/RATE_LIMIT/SERVER/
+#                                  TIMEOUT/TRANSPORT;永久错误(NO_ADAPTER/UNKNOWN_MODEL/
+#                                  MISSING_CREDENTIAL 等)不在其中,一次败就直接切,不白烧请求。
+#                   backoff         指数退避:initialDelayMs 500 → maxDelayMs 10000,jitterRatio 0.1;
+#                                  上游 Retry-After 在 maxDelayMs 界内优先,超界则直接切(不等了)。
+#                 缺省 = 官方默认;坏值只 warn 并回落默认,不会阻止注册。
 #
 # ⚠ 不要把 provider 写成 `auto`:那是本插件自己的路由,自递归会在挂载时被 warn 并跳过。
 # ⚠ `stepfun` 是 profile 的 settings.yaml(键 llm-pi-ai.providers)里的通道:本机走**订阅入口**
@@ -26,3 +35,8 @@
           - { provider: commandcode, model: deepseek/deepseek-v4.1-flash }
           - { provider: stepfun, model: step-5-preview }
           - { provider: deepseek-official, model: deepseek-flash }
+        # retry 不写 = 官方默认(每路由 5 次重试)。要关掉或改参数再放开下面:
+        # retry:
+        #   maxRetries: 5
+        #   retryableCodes: [EMPTY_RESPONSE, RATE_LIMIT, SERVER, TIMEOUT, TRANSPORT]
+        #   backoff: { initialDelayMs: 500, maxDelayMs: 10000, jitterRatio: 0.1 }

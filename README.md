@@ -1,22 +1,27 @@
 # dsh-llm-auto
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.1.0-blue.svg)](package.json)
+[![Version](https://img.shields.io/badge/version-0.2.0-blue.svg)](package.json)
 [![DSH Plugin](https://img.shields.io/badge/dsh-plugin-8A2BE2.svg)](https://github.com/topics/dsh-plugin)
 
 给 DSH 加一个 **`auto` 模型**:模型选择器里多出一个 `Auto` 分组,组内一条 `auto`。
-选它以后,请求按你给的**顺序**依次尝试多条「provider + model」,某条失败就静默切下一条 ——
+选它以后,请求按你给的**顺序**依次尝试多条「provider + model」,某条失败会**先按官方同款策略
+在该路由内原地重试**(瞬时错误,默认最多 5 次),重试耗尽才静默切下一条 ——
 对上层(agent loop / 会话日志 / 压缩链路)它就是一个普通模型。用来把多个模型订阅"合并"成一个入口。
 
 ```
                     ┌─ 用户选了 auto/auto ─┐
    请求 ──► AutoAdapter.stream()
                     │
-                    ├─ 1) commandcode/deepseek/deepseek-v4.1-flash   ──► 失败(限流/鉴权/5xx/超时/空响应…)
-                    ├─ 2) stepfun/step-5-preview                     ──► 成功 ⇒ 分片原样透传给上层
-                    └─ 3) deepseek-official/deepseek-flash           ──► (没轮到)
+                    ├─ 1) commandcode/deepseek/deepseek-v4.1-flash
+                    │      ├─ 第 1 次失败(SERVER 502) ──► 白名单内 ⇒ 退避 500ms 后原地重试
+                    │      ├─ 第 2 次失败 ──────────────► 退避 1s 后原地重试 ……(默认最多重试 5 次)
+                    │      └─ 重试耗尽 ────────────────┐
+                    ├─ 2) stepfun/step-5-preview       ▼
+                    │      └─ 成功 ⇒ 分片原样透传给上层(前面各次的 usage 等协议分片已被丢弃)
+                    └─ 3) deepseek-official/deepseek-flash   ──► (没轮到)
                     │
-                    └─ 全部失败 ⇒ 抛 AUTO_ROUTES_EXHAUSTED,消息里逐条列出「哪条路由、怎么失败的」
+                    └─ 全部失败 ⇒ 抛 AUTO_ROUTES_EXHAUSTED,消息里逐条列出「哪条路由、试了几次、怎么失败的」
 ```
 
 ---
@@ -54,6 +59,11 @@
           - { provider: commandcode, model: deepseek/deepseek-v4.1-flash }
           - { provider: stepfun, model: step-5-preview }
           - { provider: deepseek-official, model: deepseek-flash }
+        # retry 不写 = 官方默认(每路由 5 次重试);要关掉或改参数再放开:
+        # retry:
+        #   maxRetries: 5
+        #   retryableCodes: [EMPTY_RESPONSE, RATE_LIMIT, SERVER, TIMEOUT, TRANSPORT]
+        #   backoff: { initialDelayMs: 500, maxDelayMs: 10000, jitterRatio: 0.1 }
 ```
 
 | 键 | 必填 | 默认 | 说明 |
@@ -62,6 +72,15 @@
 | `name` | | `Auto` | **模型**显示名(选择器里的分组名恒为 `Auto`) |
 | `contextWindow` | | 见下 | 覆盖对外宣称的上下文窗口(正整数)|
 | `logLimit` | | `50` | 路由日志环形缓冲条数(仅内存) |
+| `retry.maxRetries` | | `5` | **每路由**重试上限(不含首次);`0` = 关闭重试,恢复"一次败就切" |
+| `retry.retryableCodes` | | `EMPTY_RESPONSE`/`RATE_LIMIT`/`SERVER`/`TIMEOUT`/`TRANSPORT` | 可重试的错误码**白名单**;永久错误(不在表里的)一次败就切,不白烧请求 |
+| `retry.backoff.initialDelayMs` | | `500` | 指数退避起步(毫秒) |
+| `retry.backoff.maxDelayMs` | | `10000` | 退避封顶;上游 `Retry-After` 超过它则不等了,直接切下一条 |
+| `retry.backoff.jitterRatio` | | `0.1` | ±10% 对称抖动 |
+
+`retry` 块的**形状与默认值全部复用官方** `resolveRetryPolicy`(`@deepseek-ai/dsh-llm`,
+即自带 `dsh-llm-retry` 用的那个):选 `auto` 与选普通模型的重试语义一致。只支持 `mode: 'normal'`
+(`always` = 无上限重试,单请求可能无上限计费,挂载时 warn 并回落默认);坏值只 warn 不阻止注册。
 
 `contextWindow` 不写时:**逐个试路由**,取第一条能给出正整数窗口的那条的窗口;
 全都拿不到就用保守值 `65536`(宁可让压缩早触发,也不要谎报一个大窗口导致请求必撞上游上限)。
@@ -94,17 +113,38 @@ DSH 的适配器失败**不是抛异常**,而是终止分片
 (而 `SERVER` 并不在 `@deepseek-ai/dsh-llm` 的错误码常量里,是 pi-ai 自己带的)。
 白名单会把真实错误漏成"不回退"。
 
-### 硬要求:已经吐给调用方内容之后**不回退**
+> 注意这是**换路由**的口径。**原地重试**是另一套、相反的口径(白名单,见下节):
+> 重试比切换贵(同一路由重复计费),永久错误不值得白撞 N 次。
+
+### 硬要求:已经吐给调用方内容之后**不重试也不回退**
 
 一旦向调用方交出了**内容**分片(`text-delta` / `reasoning-delta` / `tool-call-delta` / `block-end`),
-后续失败原样上报,绝不换路由 —— 否则用户会看到"半截回答 + 重新回答"的拼接。
+后续失败原样上报,绝不换路由、绝不在该路由内重试 —— 否则用户会看到"半截回答 + 重新回答"的拼接。
 
-实现上还有一条来自源码的硬约束:**回退只能发生在"一个分片都没交出去"的时候**。
+实现上还有一条来自源码的硬约束:**重试/回退只能发生在"一个分片都没交出去"的时候**。
 `@deepseek-ai/dsh-llm/lib/invariant.js` 给每一次 `llm/stream` 套了流语法校验器,它会拒绝
 「同一个流里 `block-start` 重复 index」和「`usage` 出现两次」。所以 `block-start` 与 `usage`
 会被**暂存**,直到第一条内容分片到达才一起放行。这不是洁癖:真机观测到
 `ww/gpt-6-astra` **先发一个全零 usage 再报 502**(2026-09-23 探针实测,该条已在同日改链时移出),
-暂存 usage 正好让这种情形仍能安全回退。
+暂存 usage 正好让这种情形仍能安全重试/回退。
+
+### 路由内重试(v0.2.0 起,默认开启)
+
+某条路由失败时,若错误码在**瞬时白名单**(`EMPTY_RESPONSE` / `RATE_LIMIT` / `SERVER` /
+`TIMEOUT` / `TRANSPORT`)且该路由还有尝试预算,就带退避**原地重试**,重试耗尽才切下一条。
+策略形状/默认值/校验复用官方 `resolveRetryPolicy`(`@deepseek-ai/dsh-llm`),
+与不选 `auto` 时的普通模型完全一致:
+
+- 默认每路由最多**重试 5 次**(共 6 次尝试),`retry.maxRetries: 0` 关闭;
+- 退避 500ms 起步、10s 封顶的指数退避,±10% jitter(第 1/2/3… 次重试前约等
+  0.5s / 1s / 2s / 4s / 8s);
+- 上游 `Retry-After` 在 10s 界内优先;超过上限则**不等了直接切**(与官方 normal 模式一致 ——
+  一条"等 120s"的指令等满了大概率还是限流,不如换一条健康的路);
+- 白名单外的错误码(永久错误)**不重试**,一次败就切;
+- 调用方取消(含退避等待中被取消)立即收尾,不再打上游;
+- 与自带 `@deepseek-ai/dsh-llm-retry` **不叠加**:那个挂在 agent loop 瀑布上管"整步重跑",
+  管不到本插件的嵌套调用;本插件的最终错误码 `AUTO_ROUTES_EXHAUSTED` 也不在它的默认可重试
+  集合里。同一次上游失败只会被一层消费,不会双重计费。
 
 ### 空响应也算失败
 
@@ -121,6 +161,15 @@ auto: 全部 2 条路由均失败
   1) probe-no-such-provider/whatever → NO_ADAPTER: no adapter registered for provider "probe-no-such-provider"（1 ms）
   2) commandcode/xiaomi/definitely-not-a-model → UNKNOWN_MODEL: pi-ai provider "commandcode" has no configured model "xiaomi/definitely-not-a-model"（0 ms）
 ```
+
+重试到耗尽的路由会多带一个次数后缀(每条路由在聚合错误里只有一行,次数 = 该路由的总尝试数):
+
+```
+  2) commandcode/deepseek-v4.1-flash → SERVER(HTTP 502): 502 status code（8231 ms，共 6 次尝试）
+```
+
+行里的 `elapsedMs` 是该路由**最后一次**尝试的耗时(不是 6 次的累计);逐次耗时看
+`/api/llm-auto/routes` 的 ring 记录(每条 attempt 一条)。
 
 用 `LlmError` 而不是裸 `AggregateError`:后者的码会被归一成 `UNKNOWN`,丢掉可路由性。
 
@@ -169,20 +218,26 @@ GET /api/llm-auto/routes?limit=N      # limit 省略/非法 = 不限(以容量�
 ```json
 {
   "provider": "auto", "model": "auto", "name": "Auto",
+  "retry": { "mode": "normal", "maxRetries": 5, "retryableCodes": ["EMPTY_RESPONSE", "RATE_LIMIT", "SERVER", "TIMEOUT", "TRANSPORT"], "initialDelayMs": 500, "maxDelayMs": 10000, "jitterRatio": 0.1 },
   "chain": ["commandcode/deepseek/deepseek-v4.1-flash", "stepfun/step-5-preview", "deepseek-official/deepseek-flash"],
   "capacity": 50, "total": 2,
   "routes": [
-    { "at": "2026-09-23T13:03:49.516Z", "attempt": 1, "provider": "probe-no-such-provider",
+    { "at": "2026-09-23T13:03:49.516Z", "attempt": 1, "try": 1, "provider": "probe-no-such-provider",
       "model": "whatever", "ok": false, "switched": true, "elapsedMs": 1,
       "code": "NO_ADAPTER", "reason": "NO_ADAPTER: no adapter registered for provider \"probe-no-such-provider\"" },
+    { "at": "2026-09-23T13:03:50.516Z", "attempt": 1, "try": 2, "willRetry": true, "provider": "commandcode",
+      "model": "deepseek/deepseek-v4.1-flash", "ok": false, "switched": false, "elapsedMs": 1200,
+      "code": "SERVER", "reason": "SERVER(502): 502 status code" },
     { "at": "2026-09-23T13:03:51.518Z", "attempt": 3, "provider": "commandcode",
       "model": "deepseek/deepseek-v4.1-flash", "ok": true, "switched": false, "elapsedMs": 1900 }
   ]
 }
 ```
 
-字段:`at`(时间)、`attempt`(第几次尝试,1 起)、`provider`/`model`(命中的路由)、
+字段:`at`(时间)、`attempt`(第几条路由,1 起)、`try`(该路由第几次尝试,1 起)、
+`willRetry`(存在且为 true 表示这条失败后还会重试,不是终态)、`provider`/`model`(命中的路由)、
 `ok`(是否成功)、`switched`(这次失败是否触发了切换)、`elapsedMs`(耗时)、`code`/`reason`(失败原因摘要)。
+顶层 `retry` 是当前生效的重试策略(排查"它为什么重试/为什么不重试"先看这个)。
 
 > ⚠ **该端点不经过浏览器鉴权**:它是 exact 路由,优先于 `dsh-client-connection` 注册的
 > `/api` 前缀(前缀表只在 exact 未命中时才查),因此不检查鉴权 cookie。
@@ -191,19 +246,28 @@ GET /api/llm-auto/routes?limit=N      # limit 省略/非法 = 不限(以容量�
 ### 日志
 
 用插件 logger(`llm-auto` 子系统):
-- 挂载时一条 `info`:`auto: 已注册路由 auto/auto（Auto）→ commandcode/… → ww/…`;
-- 每次切换一条 `warn`:`auto: 第 1 条路由 x/y 失败(SERVER(502): …),静默切换 → a/b`;
+- 挂载时一条 `info`:`auto: 已注册路由 auto/auto（Auto）→ commandcode/… → ww/…；重试: 每路由最多 5 次(瞬时码 …),退避 500→10000ms jitter 0.1`;
+- 每次重试一条 `warn`:`auto: 第 1 条路由 x/y 第 2 次尝试失败(SERVER(502): …),500 ms 后重试(剩余重试 3 次)`;
+- 每次切换一条 `warn`:`auto: 第 1 条路由 x/y 失败(SERVER(502): …,共尝试 6 次),静默切换 → a/b`;
 - 已经产出内容后失败、以及错误码不允许回退时各一条 `warn`;
 - 全部失败一条 `error`。
 
-不刷屏:每次**切换**才一条,正常请求零日志。
+不刷屏:每次**重试/切换**才一条,正常请求零日志。
 
 ---
 
 ## 6. 边界与已知限制
 
-- **只"失败时切换"**:不做额度记账、不按价格/能力/内容挑路由。顺序完全由 `routes` 决定。
-- **不做视觉/长上下文分流**:上游同类插件按"含图 / 超长"分流,本插件按用户明确要求只做失败回退。
+- **只"失败时切换",不挑路由**:不做额度记账、不按价格/能力/内容挑路由。顺序完全由 `routes` 决定;
+  失败时先在**该路由内**重试(见上节),重试耗尽或码不可重试才按顺序切下一条。
+- **重试的计费/时延上限(默认参数下)**:单次 `auto` 请求最坏 = 链长 × 6 次上游调用、约 15.5s×链长
+  的退避(0.5+1+2+4+8+10s);想省就把 `retry.maxRetries` 调小或设 `0`。每次重试都是新的上游请求,
+  与自带 `dsh-llm-retry` 一样可能重复计费 input token。连带效应:ring 缓冲(默认 50 条)消耗也快
+  约 6 倍 —— 一条全瞬时失败的链一个请求就占 20+ 条,想多留历史就调大 `logLimit`。
+- **只支持 `mode: 'normal'`**:`always`(无上限重试)在单请求内可能无上限计费,挂载时 warn 并回落默认。
+- **插件卸载不 drain 在飞退避**:cordis 卸载本插件时,正在进行的退避(≤10s)会自然完成,不像官方
+  `dsh-llm-retry` 有 lifetime abort + drain(它挂在 agent loop 上,拿得到 session 生命周期)。
+- **不做视觉/长上下文分流**:上游同类插件按"含图 / 超长"分流,本插件按用户明确要求只做失败重试/回退。
 - **不声明 `inputModalities`**:目录里不宣称"支持图片"。"能不能收图"交给真正被选中的那条路由决定;
   声明了反而会让运行时按声明去投影请求(把图片换成占位文本)。
 - **`reasoningEffort` 一律用该路由可用的最高强度**(2026-09-23 用户指定):每跳前问一次该路由
@@ -219,7 +283,9 @@ GET /api/llm-auto/routes?limit=N      # limit 省略/非法 = 不限(以容量�
 - **路由日志是进程内内存**,重启即清空,不适合当审计账本。
 - **失败原因摘要可能含上游返回的文本**(如报文片段),但不含凭据:各适配器按设计不把 key 写进消息。
 - **未实测覆盖**:①"已产出内容后失败"只有单测(含真实 `LlmRuntime` + 真实流语法不变式)覆盖,
-  没有对真上游稳定复现过(需要一条"吐一半再断"的路由);②非回环绑定下的鉴权影响未评估(见 §5)。
+  没有对真上游稳定复现过(需要一条"吐一半再断"的路由);②**路由内重试**同样只有单测/真实
+  `LlmRuntime` 覆盖,没有对真上游的瞬时抖动复现过(需要一条"抖几下再好"的路由);③非回环绑定下的
+  鉴权影响未评估(见 §5)。
 - **第三方同类插件**:`zhanghao3693/dsh-llm-router` 功能相近(按内容分流 + 回退链)。本插件是
   本机自建、只做失败回退,不依赖也不需要它。
 
@@ -235,9 +301,10 @@ node --test "test/*.test.mjs"     # 注意:Node 24 起 `node --test test/` 不�
 | 文件 | 覆盖 |
 | --- | --- |
 | `test/routes.test.mjs` | `normalizeRoutes`(空/非数组/自递归/重复/单条坏条目)、`describeChain`、`createRing` |
-| `test/adapter.test.mjs` | 首次成功、首条失败后回退、全部失败聚合、**已产出内容后失败不回退**、暂存分片、空响应、不可回退码、取消、上游抛异常、按路由取最高推理档位、窗口解析 |
-| `test/runtime-integration.test.mjs` | 用**真实** `LlmRuntime` + **真实** `@deepseek-ai/dsh-llm/invariant` 跑端到端:目录校验、回退后的流语法零违规、聚合错误的终止分片、注销后路由立刻消失 |
-| `test/endpoint.test.mjs` | `apply()` 的注册/拒绝注册分支、`provider: auto` 跳过、HTTP 端点响应 |
+| `test/retry.test.mjs` | `normalizeRetry` 全部分支(缺省/布尔/对象/always/坏值回落)、`computeRetryDelay`(官方口径序列与 jitter 边界)、`describeRetryPolicy` |
+| `test/adapter.test.mjs` | 首次成功、首条瞬时失败后先重试再回退、全部失败聚合(带尝试次数)、**已产出内容后失败不重试不回退**、暂存分片、空响应(可重试)、不可回退码、取消、退避中取消、上游抛异常、按路由取最高推理档位、窗口解析;重试块另覆盖:第 N 次成功、白名单外不重试、`maxRetries: 0` 旧行为、`Retry-After` 界内优先/超界直切、退避序列 500/1000/2000/4000/8000 |
+| `test/runtime-integration.test.mjs` | 用**真实** `LlmRuntime` + **真实** `@deepseek-ai/dsh-llm/invariant` 跑端到端:目录校验、回退后的流语法零违规、**重试后成功的流语法零违规**、`maxRetries: 0` 旧行为、聚合错误的终止分片、注销后路由立刻消失 |
+| `test/endpoint.test.mjs` | `apply()` 的注册/拒绝注册分支、`provider: auto` 跳过、HTTP 端点响应、`retry` 默认值/关闭/坏值回落 |
 
 `runtime-integration` 是这套测试里最值钱的一个:它把"我的输出能不能被宿主接受"也钉住了 ——
 尤其是"回退时不能出现重复 `block-start` / 重复 `usage`"这条,只有跑真实校验器才测得出来。
@@ -259,6 +326,8 @@ node --test "test/*.test.mjs"     # 注意:Node 24 起 `node --test test/` 不�
 | 选择器里没有 `Auto` 分组 | 插件没装进 `node_modules`(只改了 `plugins\`)、或宿主没重启、或用 `--dump-config` 看 insert 块没进去 |
 | 有分组但选 `auto` 就报 `NO_ADAPTER` | 宿主还在跑旧代码,或 insert 块被别处覆盖了 |
 | 每次第一条必失败 | `routes[0]` 那条路由本机不可用(例如 `deepseek-official` 无凭据);`/api/llm-auto/routes` 会直接告诉你 code |
+| 一条路由要试 6 次才切/切得慢 | 重试默认开启(每路由 5 次 + 退避累计约 15.5s);这是 v0.2.0 起的预期行为,想关:`retry.maxRetries: 0` |
+| 期望"失败立即切"但它等了 | 失败码在瞬时白名单(RATE_LIMIT/SERVER/TIMEOUT/TRANSPORT/EMPTY_RESPONSE);不在白名单的码(NO_ADAPTER/UNKNOWN_MODEL/MISSING_CREDENTIAL…)本来就是一次败就切 |
 | 改了源码没反应 | `file:` 在 pnpm 下不保证是拷贝还是硬链接;必须 remove + add 同步 + 重启,并用 SHA256 比对两处确认(见 §4) |
 | 上下文窗口明显偏小 | `contextWindow` 没配且首选路由解析不到窗口,回落到了保守值 65536;显式配一个即可 |
 
