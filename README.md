@@ -28,7 +28,7 @@
 ```bash
 # ① 装进 profile:profile 的 package.json 里加依赖,然后 pnpm install(或 npm install)
 #      "dsh-llm-auto": "github:liuyun847/dsh-llm-auto"
-#    (也在开发这个插件?本地 file: 依赖见 §4 —— pnpm 下它是实体拷贝,不是链接)
+#    (也在开发这个插件?本地 file: 依赖见 §4 —— pnpm 下不保证是拷贝还是硬链接)
 
 # ② 把本插件自带的 cordis.patch.yml 里那个 - insert: 块复制到
 #    ~/.dsh/profiles/<profile>/cordis.patch.yml 末尾,按本机 provider 改 routes
@@ -132,8 +132,9 @@ auto: 全部 2 条路由均失败
 
 ## 4. 生效条件(踩过)
 
-1. **`file:` 依赖在 pnpm 下是实体拷贝,不是链接。** 真正被加载的是
-   `~\.dsh\profiles\<profile>\node_modules\dsh-llm-auto\`;直接改 `plugins\` 下的源码**不生效**。
+1. **`file:` 依赖在 pnpm 下不保证是拷贝还是硬链接**(本机实测两者混存:同名文件可能共 inode,也可能
+   是独立副本)。真正被加载的是 `~\.dsh\profiles\<profile>\node_modules\dsh-llm-auto\`,改完 `plugins\` 下的
+   源码**别假设副本会自动更新** —— 用 SHA256 比对两处确认;编辑器"另存/原子替换"会**断开硬链接**,两处分叉。
    改完必须重新同步,而且要用 **remove + add**(只 `add` 可能报 "Already up to date" 而跳过拷贝):
 
    ```bash
