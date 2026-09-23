@@ -40,6 +40,42 @@ describe('apply:注册与配置解析', () => {
     assert.equal(logs.info.length, 1)
     assert.match(logs.info[0], /已注册路由 auto\/auto/u)
     assert.match(logs.info[0], /commandcode\/deepseek\/deepseek-v4\.1-flash → ww\/gpt-6-astra/u)
+    assert.match(logs.info[0], /重试: 每路由最多 5 次/u, 'retry 缺省 ⇒ 官方默认(5 次重试)')
+  })
+
+  it('retry 缺省 ⇒ 官方默认策略(每路由 5 次重试,瞬时码白名单,500→10000ms)', () => {
+    const { ctx, routes } = makeFakeCtx()
+    apply(ctx, { routes: ROUTES })
+    const body = invoke(routes[0].handler, ROUTES_PATH)
+    assert.deepEqual(body.json.retry, {
+      mode: 'normal',
+      maxRetries: 5,
+      retryableCodes: ['EMPTY_RESPONSE', 'RATE_LIMIT', 'SERVER', 'TIMEOUT', 'TRANSPORT'],
+      initialDelayMs: 500,
+      maxDelayMs: 10000,
+      jitterRatio: 0.1,
+    })
+  })
+
+  it('retry: { maxRetries: 0 } ⇒ 关闭路由内重试(每路由只尝试一次)', () => {
+    const { ctx, routes, logs } = makeFakeCtx()
+    apply(ctx, { routes: ROUTES, retry: { maxRetries: 0 } })
+    assert.equal(logs.warn.length, 0)
+    const body = invoke(routes[0].handler, ROUTES_PATH)
+    assert.equal(body.json.retry.maxRetries, 0)
+  })
+
+  it('retry 配置坏 ⇒ 只 warn 不拖垮宿主,回落官方默认(插件约定:配置错误不该让宿主起不来)', () => {
+    for (const retry of [{ maxRetries: -1 }, { backoff: { initialDelayMs: 99999, maxDelayMs: 1 } }, { mode: 'always' }, 'nope', { attempts: 5 }]) {
+      const { ctx, logs, registered, routes } = makeFakeCtx()
+      assert.doesNotThrow(() => apply(ctx, { routes: ROUTES, retry }))
+      assert.equal(registered.length, 1, `${JSON.stringify(retry)} 不该阻止注册`)
+      assert.equal(routes.length, 1)
+      assert.equal(logs.error.length, 0, '坏 retry 不该升级成 error')
+      assert.ok(logs.warn.length >= 1)
+      const body = invoke(routes[0].handler, ROUTES_PATH)
+      assert.equal(body.json.retry.maxRetries, 5, `${JSON.stringify(retry)} 应回落官方默认`)
+    }
   })
 
   it('routes 缺失/为空:打一条 error 并**不注册**(不抛错 ⇒ 宿主照常启动)', () => {
