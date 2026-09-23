@@ -259,7 +259,7 @@ node --test "test/*.test.mjs"     # 注意:Node 24 起 `node --test test/` 不�
 | 选择器里没有 `Auto` 分组 | 插件没装进 `node_modules`(只改了 `plugins\`)、或宿主没重启、或用 `--dump-config` 看 insert 块没进去 |
 | 有分组但选 `auto` 就报 `NO_ADAPTER` | 宿主还在跑旧代码,或 insert 块被别处覆盖了 |
 | 每次第一条必失败 | `routes[0]` 那条路由本机不可用(例如 `deepseek-official` 无凭据);`/api/llm-auto/routes` 会直接告诉你 code |
-| 改了源码没反应 | `file:` 是实体拷贝:必须 remove + add 同步 + 重启(见 §4) |
+| 改了源码没反应 | `file:` 在 pnpm 下不保证是拷贝还是硬链接;必须 remove + add 同步 + 重启,并用 SHA256 比对两处确认(见 §4) |
 | 上下文窗口明显偏小 | `contextWindow` 没配且首选路由解析不到窗口,回落到了保守值 65536;显式配一个即可 |
 
 ## License
