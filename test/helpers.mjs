@@ -13,9 +13,9 @@ export const chunk = {
   textBlockEnd: (text, index = 0) => ({ type: 'block-end', index, block: { type: 'text', text } }),
   usage: (inputTokens = 1, outputTokens = 1) => ({ type: 'usage', usage: { inputTokens, outputTokens } }),
   finishStop: () => ({ type: 'finish', reason: { kind: 'stop' } }),
-  finishError: (code, message, status) => ({
+  finishError: (code, message, status, providerRetryAfterMs) => ({
     type: 'finish',
-    reason: { kind: 'error', failure: { code, message, ...(status === undefined ? {} : { status }) } },
+    reason: { kind: 'error', failure: { code, message, ...(status === undefined ? {} : { status }), ...(providerRetryAfterMs === undefined ? {} : { providerRetryAfterMs }) } },
   }),
   finishAborted: (code = 'ABORTED', message = 'aborted') => ({ type: 'finish', reason: { kind: 'aborted', failure: { code, message } } }),
 }

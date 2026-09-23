@@ -11,7 +11,7 @@ import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import LlmRuntime, { LlmAdapter, LlmError } from '@deepseek-ai/dsh-llm'
-import { AutoAdapter } from '../lib/index.js'
+import { AutoAdapter, NO_RETRY_POLICY } from '../lib/index.js'
 import { EXHAUSTED_CODE } from '../lib/errors.js'
 import { chunk, successScript } from './helpers.mjs'
 
@@ -46,15 +46,18 @@ class ScriptedAdapter extends LlmAdapter {
 }
 
 /** 装好 auto 路由 + 若干上游路由,返回收集分片的工具。 */
-async function setup(upstreams, routes) {
+async function setup(upstreams, routes, options = {}) {
   const { ctx, llm, violations } = await makeRuntime()
   for (const [provider, script] of Object.entries(upstreams)) llm.registerAdapter([provider], new ScriptedAdapter(script))
   const adapter = new AutoAdapter({
     llm,
     routes,
     modelName: 'Auto',
+    retryPolicy: options.retryPolicy,
     logger: { info: () => {}, warn: () => {}, error: () => {} },
     resolveContextWindow: async () => 4096,
+    // 默认开启路由内重试(官方默认策略);注入即时 sleep,避免用例真等 15.5s 退避。
+    sleep: async () => true,
   })
   const handle = llm.registerAdapter(['auto'], adapter)
   return { ctx, llm, violations, handle }
@@ -99,10 +102,33 @@ describe('真实 LlmRuntime + 真实流语法不变式', () => {
   })
 
   it('首条以终止分片报错 ⇒ 静默切第二条,不变式零违规', async () => {
+    // SERVER 在瞬时白名单:先原地重试到默认上限(5 次),耗尽后才切第二条
     const { llm, violations } = await setup({
       up1: [chunk.finishError('SERVER', 'boom', 500)],
       up2: successScript('second route'),
     }, ROUTES)
+    const { chunks, thrown } = await run(llm)
+    assert.equal(thrown, undefined)
+    assert.deepEqual(chunks, successScript('second route'))
+    assert.deepEqual(violations, [])
+  })
+
+  it('路由内重试后成功:重试发生在未提交阶段,不变式零违规', async () => {
+    let n = 0
+    const script = () => (n += 1, n < 3 ? [chunk.finishError('SERVER', 'boom', 500)] : successScript('retry works'))
+    const { llm, violations } = await setup({ up1: script, up2: successScript('never') }, ROUTES)
+    const { chunks, thrown } = await run(llm)
+    assert.equal(thrown, undefined)
+    assert.equal(n, 3, '默认策略下第 3 次尝试成功')
+    assert.deepEqual(chunks, successScript('retry works'))
+    assert.deepEqual(violations, [], '重试不引入重复 block-start / 重复 usage')
+  })
+
+  it('maxRetries: 0 ⇒ 一次败就切(与 0.1.0 旧行为一致),不变式零违规', async () => {
+    const { llm, violations } = await setup({
+      up1: [chunk.finishError('SERVER', 'boom', 500)],
+      up2: successScript('second route'),
+    }, ROUTES, { retryPolicy: NO_RETRY_POLICY })
     const { chunks, thrown } = await run(llm)
     assert.equal(thrown, undefined)
     assert.deepEqual(chunks, successScript('second route'))
