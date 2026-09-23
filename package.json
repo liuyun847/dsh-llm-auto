@@ -1,0 +1,24 @@
+{
+  "name": "dsh-llm-auto",
+  "description": "DSH 宿主插件:注册一个 `auto` 模型路由,内部按配置的有序回退链依次尝试多条「provider + model」,某条在**产出任何内容之前**失败就静默切下一条,对上层表现为一个普通模型",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib"
+  ],
+  "scripts": {
+    "test": "node --test \"test/*.test.mjs\""
+  },
+  "license": "MIT",
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.2",
+    "@deepseek-ai/dsh-llm": "^0.1.6-alpha.2"
+  }
+}

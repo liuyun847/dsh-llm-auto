@@ -1,0 +1,28 @@
+# dsh-llm-auto 自带的装载配置。
+#
+# ⚠ 这份文件是**配置范本**,不会自动生效:本地 `file:` 插件没有 `dsh.bundle` 字段,
+#   因此不进 `dsh.profile.bundles`,装载只能由 profile 自己的 patch 层完成。
+#   把下面 `- insert:` 整块**原样复制**到 `~\.dsh\profiles\<profile>\cordis.patch.yml`
+#   末尾即可(该文件属 patch 层改动,保存即热加载;但插件**代码**首次加载要等宿主重启)。
+#
+# 配置键(全部可选,除 routes):
+#   routes        有序回退链;第一项即首选。每项 { provider, model },model 要写全
+#                 (settings.yaml 里的真实 id,例如 `xiaomi/mimo-v2.6-pro`,别省前缀)。
+#   name          模型显示名,默认 `Auto`(选择器里出现的是 `Auto` 分组 + 这个模型名)。
+#   contextWindow 对外宣称的上下文窗口;不写则取**第一条可解析路由**的窗口,取不到用保守值 65536。
+#   logLimit      路由日志环形缓冲条数,默认 50(仅内存,重启即清空)。
+#
+# ⚠ 不要把 provider 写成 `auto`:那是本插件自己的路由,自递归会在挂载时被 warn 并跳过。
+# ⚠ `stepfun` 是 profile 的 settings.yaml(键 llm-pi-ai.providers)里的通道:本机走**订阅入口**
+#   https://api.stepfun.com/step_plan/v1(凭据 STEP_API_KEY)。同厂另有按量计费入口
+#   https://api.stepfun.com/v1 —— 两者 baseURL 不同、**别混用**;全球区 .ai 对本机 key 报 401。
+# ⚠ `deepseek-official` 靠 DEEPSEEK_API_KEY 解析(本机在**用户级环境变量**里, 已实测有效);
+#   环境变量只在宿主启动时读入 ⇒ 宿主早于该变量设置而启动时该跳报 MISSING_CREDENTIAL, 重启即修。
+- insert:
+    - id: llm-auto
+      name: 'dsh-llm-auto'
+      config:
+        routes:
+          - { provider: commandcode, model: deepseek/deepseek-v4.1-flash }
+          - { provider: stepfun, model: step-5-preview }
+          - { provider: deepseek-official, model: deepseek-flash }
