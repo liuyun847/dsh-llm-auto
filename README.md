@@ -142,6 +142,10 @@ auto: 全部 2 条路由均失败
      file:%USERPROFILE%\.dsh\profiles\<profile>\plugins\dsh-llm-auto --profile <profile>
    ```
 
+   `dshpm` 是本机工作区里的插件装卸 CLI(`dsh-plugin-manager`,即上面那个脚本),公开环境没有它;
+   可用官方 `dsh plugin add` / `dsh plugin remove` 代替,只是官方命令在部分版本会超时并丢
+   `dsh.profile.bundles` 更新,所以本机一直用 `dshpm`。
+
    同步后用 SHA256 比对两份 `lib/index.js` 一致。
 
 2. **改插件代码要重启 dsh** —— loader 按 URL 缓存已 import 的模块实例。
