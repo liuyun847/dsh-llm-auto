@@ -13,11 +13,11 @@
                     ┌─ 用户选了 auto/auto ─┐
    请求 ──► AutoAdapter.stream()
                     │
-                    ├─ 1) commandcode/deepseek/deepseek-v4.1-flash
+                    ├─ 1) opencode-go/deepseek-v4.1-flash
                     │      ├─ 第 1 次失败(SERVER 502) ──► 白名单内 ⇒ 退避 500ms 后原地重试
                     │      ├─ 第 2 次失败 ──────────────► 退避 1s 后原地重试 ……(默认最多重试 5 次)
                     │      └─ 重试耗尽 ────────────────┐
-                    ├─ 2) stepfun/step-5-preview       ▼
+                    ├─ 2) commandcode/deepseek/deepseek-v4.1-flash   ▼
                     │      └─ 成功 ⇒ 分片原样透传给上层(前面各次的 usage 等协议分片已被丢弃)
                     └─ 3) deepseek-official/deepseek-flash   ──► (没轮到)
                     │
@@ -56,8 +56,8 @@
       name: 'dsh-llm-auto'
       config:
         routes:
+          - { provider: opencode-go, model: deepseek-v4.1-flash }
           - { provider: commandcode, model: deepseek/deepseek-v4.1-flash }
-          - { provider: stepfun, model: step-5-preview }
           - { provider: deepseek-official, model: deepseek-flash }
         # retry 不写 = 官方默认(每路由 5 次重试);要关掉或改参数再放开:
         # retry:
@@ -68,7 +68,7 @@
 
 | 键 | 必填 | 默认 | 说明 |
 | --- | --- | --- | --- |
-| `routes` | ✅ | — | 有序回退链,**第一项即首选**。每项 `{ provider, model }`;`model` 要写全(settings.yaml 里的真实 id,如 `deepseek/deepseek-v4.1-flash`、`step-5-preview`,别省前缀) |
+| `routes` | ✅ | — | 有序回退链,**第一项即首选**。每项 `{ provider, model }`;`model` 要写全(settings.yaml 里的真实 id,如 `deepseek-v4.1-flash`、`deepseek/deepseek-v4.1-flash`,别省前缀) |
 | `name` | | `Auto` | **模型**显示名(选择器里的分组名恒为 `Auto`) |
 | `contextWindow` | | 见下 | 覆盖对外宣称的上下文窗口(正整数)|
 | `logLimit` | | `50` | 路由日志环形缓冲条数(仅内存) |
@@ -145,6 +145,51 @@ DSH 的适配器失败**不是抛异常**,而是终止分片
 - 与自带 `@deepseek-ai/dsh-llm-retry` **不叠加**:那个挂在 agent loop 瀑布上管"整步重跑",
   管不到本插件的嵌套调用;本插件的最终错误码 `AUTO_ROUTES_EXHAUSTED` 也不在它的默认可重试
   集合里。同一次上游失败只会被一层消费,不会双重计费。
+
+### 历史回放:嵌套调用前把 `source` 改回真实路由(2026-09-24 修复)
+
+**症状**:经 `auto` 的会话回放历史时,模型自己每一轮的**思考被当成普通正文**发给上游,
+思考通道被填成空串;直连同一路由(`opencode-go`)则两个通道严格分离。
+会话持久化记录本身是完整的(思考块、正文块、`replayState` 都在),坏的只是**出站负载**。
+
+**成因**(五环,每一环都读过源码):
+
+```
+会话里的历史助手消息:source.provider = "auto"(外层请求的 provider)
+                      source.replayState.response.provider = "opencode-go"(嵌套路由真正用的)
+   ↓ ① dsh-agent-loop 把"当次请求的 provider"写进 source.provider ⇒ 经 auto 的每一轮都写着 auto
+   ↓ ② LlmRuntime.forAdapter 只保留「历史 provider 的适配器 === 本次适配器」的 replay 状态
+        嵌套调用里本次适配器是 pi-ai、历史 provider 是 auto(归本插件)⇒ replay 被剥掉
+   ↓ ③ dsh-llm-pi-ai 的 toPiAssistant 见不到 replay ⇒ 退到 foreignAssistant
+        (打上 provider=auto / api="dsh-foreign" / model=auto)
+   ↓ ④ pi-ai 的 transformMessages 算 isSameModel(provider+api+model 全等)⇒ 假
+        ⇒ 思考块被降级成普通文本块
+   ↓ ⑤ pi-ai 的 OpenAI 序列化把文本块拼成一个字符串当 content;
+        思考通道没人写,又因 requiresReasoningContentOnAssistantMessages 补成 ""
+```
+
+**修法**:在换 provider 的那一刻(`adapter.js` 的 `#nestedOptions`,即发起嵌套调用之前),
+把每条历史助手消息的 `source.provider` / `source.model` 换成它 `replayState.response` 里记着的
+真实路由值(纯函数 `restoreReplaySources`,见 `lib/replay.js`)。于是环 ② 的判定成立 ⇒
+replay 状态保留 ⇒ pi-ai 走 `replayedAssistant`(它正好校验 `response.provider === source.provider`
+且 `response.model === source.model`,改写后逐字通过)⇒ 思考回 `reasoning_content`、正文回 `content`。
+
+为什么**不能**改成包一层 `LlmRuntime.forAdapter`:外层请求的适配器是本插件的 `AutoAdapter`,
+外层那次 `forAdapter` 对 `source.provider === 'auto'` 的消息本来就是原样保留 replay 的
+(实测:`AutoAdapter.stream()` 收到的历史助手消息 `source` 键为 `['kind','provider','model','replayState']`);
+剥掉 replay 的是**嵌套调用**那一次。若在 `forAdapter` 外面统一改写,外层那次会变成
+「历史 provider 是 `opencode-go`、适配器却是 `AutoAdapter`」⇒ 反而把 replay 剥掉,修法失效。
+
+纪律:`restoreReplaySources` 是**纯函数** —— 只读入参、返回新对象、绝不改 `content`、
+逐条按各自的 replay 路由取值(会话中途切过路由时不能统一成"当前路由")、
+`replayState` 缺失或形状不对就**原样放行**(不抛错,交给下游适配器自己校验/降级)。
+
+字节级验收(无头 profile + 抓包代理,同一份历史两跑):
+
+| | 修复前 | 修复后 |
+| --- | --- | --- |
+| 出站 `content` | 62 字符 = 思考 57 + 正文 5(拼接,无分隔符) | **5 字符,与会话正文块 SHA256 一致** |
+| 出站 `reasoning_content` | **空串(长度 0)** | **57 字符,与会话思考块 SHA256 一致** |
 
 ### 空响应也算失败
 
@@ -277,9 +322,12 @@ GET /api/llm-auto/routes?limit=N      # limit 省略/非法 = 不限(以容量�
   让分发给出准确错误。这样既不因为"档位不匹配"让兜底路由白失败一次,也不需要调用方为每跳手动调档。
   本插件自己**不声明** reasoning 能力,所以模型选择器不会给 `auto` 提供档位选项。
 - **跨路由的 replay 元数据**:DSH 只在"历史 provider 与目标 provider 属于同一个适配器实例"时保留
-  replay 状态。`auto` 自己产出的消息(source.provider = `auto`)在嵌套调用里会被自动剥掉 replay;
-  而历史消息若本来就来自 `commandcode`,回退到同属 pi-ai 的 `ww` 时 replay 会被保留 ——
-  这是上游既有行为(手动切模型时同样发生),不是本插件引入的,但**路由切换确实会让它更容易出现**。
+  replay 状态。`auto` 自己产出的消息(source.provider = `auto`)在嵌套调用里会被自动剥掉 replay ——
+  这正是上面「历史回放」一节修的缺陷:剥掉后 pi-ai 会把思考摊平进正文、把 `reasoning_content`
+  填成空串。本插件在嵌套调用前把 source 改回 replay 记录的真实路由来保住它;历史消息若本来就来自
+  `commandcode`,回退到同属 pi-ai 的 `ww` 时 replay 会被保留 —— 那是上游既有行为(手动切模型时
+  同样发生)。**跨模型**的历史(replay 路由 ≠ 本次路由)仍然会被 pi-ai 摊平,这是 pi-ai 自己的策略
+  (思考签名跨模型不可信),与直连时的行为一致。
 - **路由日志是进程内内存**,重启即清空,不适合当审计账本。
 - **失败原因摘要可能含上游返回的文本**(如报文片段),但不含凭据:各适配器按设计不把 key 写进消息。
 - **未实测覆盖**:①"已产出内容后失败"只有单测(含真实 `LlmRuntime` + 真实流语法不变式)覆盖,
@@ -303,6 +351,7 @@ node --test "test/*.test.mjs"     # 注意:Node 24 起 `node --test test/` 不�
 | `test/routes.test.mjs` | `normalizeRoutes`(空/非数组/自递归/重复/单条坏条目)、`describeChain`、`createRing` |
 | `test/retry.test.mjs` | `normalizeRetry` 全部分支(缺省/布尔/对象/always/坏值回落)、`computeRetryDelay`(官方口径序列与 jitter 边界)、`describeRetryPolicy` |
 | `test/adapter.test.mjs` | 首次成功、首条瞬时失败后先重试再回退、全部失败聚合(带尝试次数)、**已产出内容后失败不重试不回退**、暂存分片、空响应(可重试)、不可回退码、取消、退避中取消、上游抛异常、按路由取最高推理档位、窗口解析;重试块另覆盖:第 N 次成功、白名单外不重试、`maxRetries: 0` 旧行为、`Retry-After` 界内优先/超界直切、退避序列 500/1000/2000/4000/8000 |
+| `test/replay.test.mjs` | `restoreReplaySources`:路由不同 ⇒ 改写且 `content` 逐字未变、路由相同/无 `replayState`/形状不对 ⇒ 原样放行不抛、非助手消息不动、多条各按自己的 replay 路由改写、冻结输入不被破坏;外加一条接线用例:经 `AutoAdapter.stream()` 的嵌套请求确实拿到了改写后的 source |
 | `test/runtime-integration.test.mjs` | 用**真实** `LlmRuntime` + **真实** `@deepseek-ai/dsh-llm/invariant` 跑端到端:目录校验、回退后的流语法零违规、**重试后成功的流语法零违规**、`maxRetries: 0` 旧行为、聚合错误的终止分片、注销后路由立刻消失 |
 | `test/endpoint.test.mjs` | `apply()` 的注册/拒绝注册分支、`provider: auto` 跳过、HTTP 端点响应、`retry` 默认值/关闭/坏值回落 |
 
@@ -329,6 +378,8 @@ node --test "test/*.test.mjs"     # 注意:Node 24 起 `node --test test/` 不�
 | 一条路由要试 6 次才切/切得慢 | 重试默认开启(每路由 5 次 + 退避累计约 15.5s);这是 v0.2.0 起的预期行为,想关:`retry.maxRetries: 0` |
 | 期望"失败立即切"但它等了 | 失败码在瞬时白名单(RATE_LIMIT/SERVER/TIMEOUT/TRANSPORT/EMPTY_RESPONSE);不在白名单的码(NO_ADAPTER/UNKNOWN_MODEL/MISSING_CREDENTIAL…)本来就是一次败就切 |
 | 改了源码没反应 | `file:` 在 pnpm 下不保证是拷贝还是硬链接;必须 remove + add 同步 + 重启,并用 SHA256 比对两处确认(见 §4) |
+| 经 `auto` 的历史思考跑到正文里、思考通道是空的 | 插件是修复前的版本(宿主还在跑旧代码);修复见 §3「历史回放」,同步两份副本并重启后消失 |
+| 日志出现 `llm-pi-ai: unusable replay state on assistant history` | 那条历史消息的 replay 状态与本次路由不匹配(例如跨模型回放),pi-ai 主动降级成 provider-neutral 内容;这是上游既有行为,不是本插件的错误 |
 | 上下文窗口明显偏小 | `contextWindow` 没配且首选路由解析不到窗口,回落到了保守值 65536;显式配一个即可 |
 
 ## License
