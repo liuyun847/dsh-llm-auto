@@ -1,7 +1,7 @@
 {
   "name": "dsh-llm-auto",
   "description": "DSH 宿主插件:注册一个 `auto` 模型路由,内部按配置的有序链依次尝试多条「provider + model」;某条在**产出任何内容之前**失败时,先按官方同款策略在该路由内原地重试(瞬时错误白名单,默认 5 次),重试耗尽才静默切下一条,对上层表现为一个普通模型",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
