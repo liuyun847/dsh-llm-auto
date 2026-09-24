@@ -22,9 +22,10 @@
 #                 缺省 = 官方默认;坏值只 warn 并回落默认,不会阻止注册。
 #
 # ⚠ 不要把 provider 写成 `auto`:那是本插件自己的路由,自递归会在挂载时被 warn 并跳过。
-# ⚠ `stepfun` 是 profile 的 settings.yaml(键 llm-pi-ai.providers)里的通道:本机走**订阅入口**
-#   https://api.stepfun.com/step_plan/v1(凭据 STEP_API_KEY)。同厂另有按量计费入口
-#   https://api.stepfun.com/v1 —— 两者 baseURL 不同、**别混用**;全球区 .ai 对本机 key 报 401。
+# ⚠ `opencode-go` 是 profile 的 settings.yaml(键 llm-pi-ai.providers)里的通道:OpenCode Go 订阅,
+#   baseURL https://opencode.ai/zen/go/v1(凭据 OPENCODE_API_KEY)。它的模型 id 是 `deepseek-v4.1-flash`,
+#   **不带** `deepseek/` 前缀 —— 带前缀的 `deepseek/deepseek-v4.1-flash` 是 `commandcode` 那条,别混。
+#   该通道强制要求 `x-opencode-session` 头(settings.yaml 里已配一个稳定 UUID)。
 # ⚠ `deepseek-official` 靠 DEEPSEEK_API_KEY 解析(本机在**用户级环境变量**里, 已实测有效);
 #   环境变量只在宿主启动时读入 ⇒ 宿主早于该变量设置而启动时该跳报 MISSING_CREDENTIAL, 重启即修。
 - insert:
@@ -32,8 +33,8 @@
       name: 'dsh-llm-auto'
       config:
         routes:
+          - { provider: opencode-go, model: deepseek-v4.1-flash }
           - { provider: commandcode, model: deepseek/deepseek-v4.1-flash }
-          - { provider: stepfun, model: step-5-preview }
           - { provider: deepseek-official, model: deepseek-flash }
         # retry 不写 = 官方默认(每路由 5 次重试)。要关掉或改参数再放开下面:
         # retry:
