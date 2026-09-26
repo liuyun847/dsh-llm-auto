@@ -160,7 +160,7 @@ contextWindow(正整数)  →  直接声明(旧键)     不写 compactWindow 时
 > ⚠ 宿主里 schema 总会给 `compactWindow` 补上默认值 500000 ⇒ **默认口径就是反算**;
 > `contextWindow` 只在"`compactWindow` 完全没出现"时才生效(直接调 `apply()` 的集成方)。
 > 两者同时给出时会打一条 warn 说明用了哪个、忽略了哪个。
-> ⚠ `compactWindow < 12484` 会另打一条 warn:此时引擎的"保留尾部 < 阈值"校验过不去
+> ⚠ `compactWindow` 低于最小可用值 12484(见 `minimumUsableCompactWindow()`)会另打一条 warn:此时引擎的"保留尾部 < 阈值"校验过不去
 > (`floor(0.16 × (T + 65536)) ≥ T`),`@deepseek-ai/dsh-compaction-basic` 每轮抛
 > `TargetPressureConfigError`;该错误被引擎捕获(`agent/pre-step` 那层):第一次 warn、之后对同一目标
 > 静默跳过压缩、回合照常继续 —— 净效果是**压缩从不发生**(不会报错,但上下文会一直涨)。
@@ -385,6 +385,7 @@ auto: 全部 2 条路由均失败
    真正被加载的是 `~\.dsh\profiles\<profile>\node_modules\dsh-llm-auto\` ⇒ 原地改已有文件两侧同生效,**不需要**
    remove + add;但 `write` / `edit` 这类"写临时文件再改名"的换文件式写入会**当场打断硬链接**,改完必须核
    两侧 `fileId`。**只有新增文件**才要重跑 link(`remove` + `add`,或 `pnpm install`;只 `add` 可能报
+   `Already up to date` 而跳过同步):
 
    ```bash
    node <工作区>\dsh-plugin-manager\dshpm.mjs remove dsh-llm-auto --profile web
