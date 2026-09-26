@@ -1,15 +1,48 @@
-# dsh-llm-auto 自带的装载配置。
+# dsh-llm-auto 的 profile 层 patch —— 本包已是组合包(bundle)，**本文件即生效层**。
+# （2026-09-25 从 profile 的 cordis.patch.yml 迁入；在此之前本文件只是一份不生效的配置范本：
+#   当时本地 file: 插件没有 dsh.bundle 字段，装载只能由 profile 自己的 patch 层完成。）
+# 启停：插件页「已安装」里本卡的总开关(写 profile 的 dsh.profile.bundles)，或卡片详情里的
+# 行级开关(向 profile 的 cordis.patch.yml 写 disabled 覆盖)。
+# 行 id `llm-auto` 是上述开关与 settings 命名空间(ns === 'llm-auto')的寻址键，勿改。
 #
-# ⚠ 这份文件是**配置范本**,不会自动生效:本地 `file:` 插件没有 `dsh.bundle` 字段,
-#   因此不进 `dsh.profile.bundles`,装载只能由 profile 自己的 patch 层完成。
-#   把下面 `- insert:` 整块**原样复制**到 `~\.dsh\profiles\<profile>\cordis.patch.yml`
-#   末尾即可(该文件属 patch 层改动,保存即热加载;但插件**代码**首次加载要等宿主重启)。
+# ⚠ 迁移带来的变化（与下文任何旧注释冲突时，以本段为准）：
+#   1. **compactWindow 的编辑入口换了地方**：产出旧输入框的 dsh-host-plugin-registry 已于
+#      同日卸载；本包 0.4.0 起自带**浏览器半侧**（lib/client.js），先注册进插件页为组合包
+#      预留的 plugins.row.config slot（键 `dsh-llm-auto#llm-auto`，表单藏在
+#      「行 llm-auto →「配置」」的二级页里），当天晚些时候按用户要求**提到卡片上**：改注册
+#      plugins.bundle.config（键 = **包名**）⇒ 插件页 →「已安装」→ 点开 dsh-llm-auto 卡片，
+#      官方 SettingsForm 表单就渲染在描述与行之间，不必再点二级页；行上那个「配置」控件随之消失。
+#      （只暴露 compactWindow 一个字段，暂存后保存才写入，带「已覆盖 / 恢复默认」。）
+#      表单经宿主 settings 服务写，只落 compactWindow 一个键；routes 原样不动。
+#      其余改法仍然可用：手编 profile 的 cordis.patch.yml 追加按 id 覆写的顶层行
+#      `- id: llm-auto` + `name: 'dsh-llm-auto'` + `config: { routes: [...], compactWindow: N }`
+#      （profile 层在包层之后应用 ⇒ 该行遮蔽本文件的 insert），或经宿主 settings 服务写
+#      settings.mutate('llm-auto', [{op:'set',path:['compactWindow'],value}], revision)。
+#      ⚠ 客户端半侧新增后**必须重启一次 dsh** 才会被收录：dsh-client-modules 把"本包不是
+#        客户端包"这一否定结论按 specifier 缓存在 pkgMeta 里，只写不删（其 lib/index.js:510/703）。
+#   2. 安装/回滚改为组合包语义：启停走插件页开关，彻底卸载用
+#      dshpm remove dsh-llm-auto --profile web（不再是"删注释块 + 删 insert 行"）。
+#   3. **改本文件不会自动生效**：dsh-hmr 只监视三个输入 —— profile 的 cordis.patch.yml、
+#      home 层 cordis.patch.yml、profile 的 package.json（dsh-hmr/lib/index.js:353-376），
+#      包内 patch 不在其中；重组合时会重读全部 bundle 层，故改动要有一次触发才被读入：
+#      在插件页点一下本卡（或任意行级）开关，或保存 profile 的 cordis.patch.yml 任意一处。
+#      ⚠ 改 lib/*.js 仍需重启 dsh（loader 按 URL 缓存已 import 的模块）。
+#   迁移前的 profile 层原文（含全部实测记录）留档于
+#   ~\.dsh\backups\bundle-migration-20260925\cordis.patch.yml.before。
 #
-# 配置键(全部可选,除 routes):
+# ── 配置键(全部可选,除 routes)────────────────────────────────────────────────
 #   routes        有序回退链;第一项即首选。每项 { provider, model },model 要写全
 #                 (settings.yaml 里的真实 id,例如 `xiaomi/mimo-v2.6-pro`,别省前缀)。
+#   compactWindow 压缩点(正整数 token,默认 500000):让自动压缩发生在这个数附近。
+#                 插件按 compaction-basic 的阈值算式反算对外宣称的窗口
+#                 (cw = max(ceil(T × 1.25), T + 65536);T = 500000 ⇒ cw = 625000),
+#                 于是压缩触发点从"声明窗口的 80%"变成你指定的 T。
+#                 ⚠ T < 12484 时引擎的"保留尾部 < 阈值"校验过不去,每轮抛
+#                   TargetPressureConfigError ⇒ 挂载时会另打一条 warn。
 #   name          模型显示名,默认 `Auto`(选择器里出现的是 `Auto` 分组 + 这个模型名)。
-#   contextWindow 对外宣称的上下文窗口;不写则取**第一条可解析路由**的窗口,取不到用保守值 65536。
+#   contextWindow 【旧键】直接声明对外宣称的上下文窗口(正整数);与 compactWindow 同时给出时
+#                 以 compactWindow 为准并被忽略(warn 会点名两者)。≤ 65536 时压缩引擎的
+#                 pressure budget ≤ 0,连阈值都算不出来 —— 这也是引入 compactWindow 的原因。
 #   logLimit      路由日志环形缓冲条数,默认 50(仅内存,重启即清空)。
 #   retry         路由内重试策略,形状与官方 retryPolicy 相同(只支持 mode: 'normal'):
 #                   maxRetries      每路由最多重试几次(不含首次),默认 5(对齐官方 dsh-llm-retry);
@@ -21,6 +54,16 @@
 #                                  上游 Retry-After 在 maxDelayMs 界内优先,超界则直接切(不等了)。
 #                 缺省 = 官方默认;坏值只 warn 并回落默认,不会阻止注册。
 #
+# 导出 schemastery Config(0.3.0):本包导出 `Config`,于是配置进入宿主的设置服务
+#   (`SettingsForms.describe()` 只投影带 schema 的活动条目,且**只投影标了 `.volatile()` 的字段**)。
+#   name / contextWindow / compactWindow / logLimit 是 volatile ⇒ 经设置服务写入后原地生效、
+#   不必重启;routes / retry 是结构性配置,故意不标 volatile,仍改在本文件里。
+#   ⚠ **效果边界**:这一步只是"配置成为可编辑条目"(settings.describe 可见、settings.mutate 可写);
+#     随包发布的 Web 客户端还没有"按 schema 自动生成表单"的页面(dsh-settings README:
+#     "no shipped client does so yet"),本包也没有客户端 half ⇒ 别期待设置页自动多出表单。
+#   ⚠ schema 是加载期校验:它对 routes/retry 用宽松类型(z.any,形状校验仍归插件自己),
+#     但把字符串写进数字键会让整行插件加载失败 —— 这是导出 Config 的代价,见插件 README §2。
+#
 # ⚠ 不要把 provider 写成 `auto`:那是本插件自己的路由,自递归会在挂载时被 warn 并跳过。
 # ⚠ `opencode-go` 是 profile 的 settings.yaml(键 llm-pi-ai.providers)里的通道:OpenCode Go 订阅,
 #   baseURL https://opencode.ai/zen/go/v1(凭据 OPENCODE_API_KEY)。它的模型 id 是 `deepseek-v4.1-flash`,
@@ -28,14 +71,30 @@
 #   该通道强制要求 `x-opencode-session` 头(settings.yaml 里已配一个稳定 UUID)。
 # ⚠ `deepseek-official` 靠 DEEPSEEK_API_KEY 解析(本机在**用户级环境变量**里, 已实测有效);
 #   环境变量只在宿主启动时读入 ⇒ 宿主早于该变量设置而启动时该跳报 MISSING_CREDENTIAL, 重启即修。
+#
+# ── 链路与依据(2026-09-24 17:35 用户改定)────────────────────────────────────
+#   OpenCode Go → StepFun → Command Code → DeepSeek 官方。要点:
+#   · 首选与 agent-default-model 同源(都是 opencode-go),选不选 auto 行为一致。
+#   · StepFun 插第 2 位:端点实测 200/1.0~1.8s(推理题 4~7s);provider 级 `reasoning` 只能写
+#     该模型声明过的档位(off/low/medium/high)—— 写 max 会让这条路由**每个**请求都抛
+#     UNSUPPORTED_REASONING_EFFORT(pi-ai resolveReasoningLevel);跨 provider 档位不串。
+#   · Command Code 额度耗尽时每条都 QUOTA 400(不在瞬时白名单 ⇒ 一次败就切,代价仅这一次撞)。
+#   · 两条 DeepSeek Flash 的 model id **不同源**:opencode-go 那条不带 `deepseek/` 前缀,
+#     commandcode 那条带前缀。写错会以 UNKNOWN_MODEL 一次败就切,不报错也不停 ——
+#     改完务必看 GET /api/llm-auto/routes 的 chain 与命中记录。
+#   · 压缩点默认口径 = compactWindow(默认 500000)反算声明窗口 625000;全链最紧那一跳的可用
+#     输入预算正好是 500000(opencode-go 884000 − maxTokens 384000)⇒ 压缩点选它有依据。
 - insert:
     - id: llm-auto
       name: 'dsh-llm-auto'
       config:
         routes:
           - { provider: opencode-go, model: deepseek-v4.1-flash }
+          - { provider: stepfun, model: step-5-preview }
           - { provider: commandcode, model: deepseek/deepseek-v4.1-flash }
           - { provider: deepseek-official, model: deepseek-flash }
+        # 压缩点(默认值就是 500000,写出来只是显式化)
+        # compactWindow: 500000
         # retry 不写 = 官方默认(每路由 5 次重试)。要关掉或改参数再放开下面:
         # retry:
         #   maxRetries: 5

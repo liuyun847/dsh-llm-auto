@@ -10,7 +10,7 @@ import { DEFAULT_CONTEXT_WINDOW } from '../lib/routes.js'
 import { EXHAUSTED_CODE } from '../lib/errors.js'
 import { chunk, drain, makeFakeLlm, successScript } from './helpers.mjs'
 
-/** 组装一个被测 adapter(默认两条路由:first / second)。 */
+/** 组装一个被测 adapter(默认两条路由:first / second);`options.modelName` 可传取值函数。 */
 function build(scripts, options = {}) {
   const routes = options.routes ?? [{ provider: 'first', model: 'm1' }, { provider: 'second', model: 'm2' }]
   const { llm, calls } = makeFakeLlm(scripts, options.windows ?? { first: 500000, second: 200000 })
@@ -20,7 +20,7 @@ function build(scripts, options = {}) {
   const adapter = new AutoAdapter({
     llm,
     routes,
-    modelName: 'Auto',
+    modelName: options.modelName ?? 'Auto',
     retryPolicy: options.retryPolicy,
     ring,
     logger: { info: () => {}, warn: (m) => warnings.push(m), error: () => {} },
@@ -47,6 +47,17 @@ describe('stdout 契约:providerInfo / listModels / resolveModel', () => {
     assert.equal(models[0].id, 'auto')
     assert.equal(models[0].name, 'Auto')
     assert.match(models[0].description, /first\/m1 → second\/m2/u)
+  })
+
+  it('modelName 可以是取值函数(宿主里 config.name 是 volatile 引用)⇒ 每次调用现取', async () => {
+    let current = 'Auto'
+    const { adapter, routes } = build({}, { modelName: () => current })
+    assert.equal((await adapter.listModels('auto'))[0].name, 'Auto')
+    assert.equal((await adapter.resolveModel('auto', 'auto')).name, 'Auto')
+    current = '我的聚合模型'
+    assert.equal((await adapter.listModels('auto'))[0].name, '我的聚合模型', '取值函数换值后立刻生效')
+    assert.equal((await adapter.resolveModel('auto', 'auto')).name, '我的聚合模型')
+    assert.deepEqual(routes, [{ provider: 'first', model: 'm1' }, { provider: 'second', model: 'm2' }])
   })
 
   it('resolveModel 回显 provider/id 并带上上下文窗口', async () => {
