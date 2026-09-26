@@ -97,6 +97,18 @@ describe('createRing', () => {
     assert.deepEqual(ring.list(99).map((item) => item.at), [1, 2, 3, 4])
   })
 
+  it('容量也可以传取值函数(宿主里 logLimit 是 volatile 引用):读时求值,缩小后立刻淘汰', () => {
+    let capacity = 3
+    const ring = createRing(() => capacity)
+    for (let i = 1; i <= 3; i += 1) ring.push({ at: i })
+    assert.equal(ring.capacity, 3)
+    assert.deepEqual(ring.list().map((item) => item.at), [1, 2, 3])
+    capacity = 1
+    assert.equal(ring.capacity, 1, 'capacity 是读时求值的 getter')
+    ring.push({ at: 4 })
+    assert.deepEqual(ring.list().map((item) => item.at), [4], '缩容后 push 时淘汰多余项')
+  })
+
   it('保守上下文窗口是个正整数', () => {
     assert.ok(Number.isInteger(DEFAULT_CONTEXT_WINDOW) && DEFAULT_CONTEXT_WINDOW > 0)
   })
