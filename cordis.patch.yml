@@ -67,7 +67,7 @@
 # ⚠ 不要把 provider 写成 `auto`:那是本插件自己的路由,自递归会在挂载时被 warn 并跳过。
 # ⚠ `opencode-go` 是 profile 的 settings.yaml(键 llm-pi-ai.providers)里的通道:OpenCode Go 订阅,
 #   baseURL https://opencode.ai/zen/go/v1(凭据 OPENCODE_API_KEY)。它的模型 id 是 `deepseek-v4.1-flash`,
-#   **不带** `deepseek/` 前缀 —— 带前缀的 `deepseek/deepseek-v4.1-flash` 是 `commandcode` 那条,别混。
+#   **不带** `deepseek/` 前缀 —— 带前缀的 `deepseek/deepseek-v4.1-flash-fast` 是 `commandcode` 那条,别混。
 #   该通道强制要求 `x-opencode-session` 头(settings.yaml 里已配一个稳定 UUID)。
 # ⚠ `deepseek-official` 靠 DEEPSEEK_API_KEY 解析(本机在**用户级环境变量**里, 已实测有效);
 #   环境变量只在宿主启动时读入 ⇒ 宿主早于该变量设置而启动时该跳报 MISSING_CREDENTIAL, 重启即修。
@@ -87,7 +87,7 @@
       config:
         routes:
           - { provider: opencode-go, model: deepseek-v4.1-flash }
-          - { provider: commandcode, model: deepseek/deepseek-v4.1-flash }
+          - { provider: commandcode, model: deepseek/deepseek-v4.1-flash-fast }
           - { provider: deepseek-official, model: deepseek-flash, keepThinking: true } # DeepSeek thinking 模式要求工具循环逐条回传思考块
         # 压缩点(默认值就是 500000,写出来只是显式化)
         # compactWindow: 500000
