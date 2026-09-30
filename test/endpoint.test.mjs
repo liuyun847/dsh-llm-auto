@@ -43,6 +43,13 @@ function invoke(handler, url) {
   return { ...captured, json: captured.body.length > 0 ? JSON.parse(captured.body) : undefined }
 }
 
+/** 把一个 auto 请求的分片流吃完(只为了驱动 ring 写记录;内容无所谓)。 */
+async function drainVia(adapter, options = { provider: 'auto', model: 'auto', messages: [] }) {
+  for await (const chunk of adapter.stream(options)) {
+    void chunk
+  }
+}
+
 describe('apply:注册与配置解析', () => {
   it('正常配置:注册 auto 路由 + 挂 /api/llm-auto/routes,并打两条 info(注册 + 窗口口径)', () => {
     const { ctx, logs, routes, registered } = makeFakeCtx()
@@ -276,5 +283,42 @@ describe('GET /api/llm-auto/routes', () => {
     await registered[0].adapter.resolveModel('auto', 'auto')
     const after = invoke(routes[0].handler, ROUTES_PATH).json
     assert.equal(after.declaredContextWindow, 884000)
+  })
+
+  it('calls 字段:按一次请求分组,与平铺 routes 同源(0.5.0 插件页面板读它)', async () => {
+    const { ctx, routes, registered } = makeFakeCtx()
+    apply(ctx, { routes: ROUTES })
+    const adapter = registered[0].adapter
+    // 假上游:第一次请求首条以**非瞬时**错误失败(不进重试白名单 ⇒ 不退避,直接切下一条),
+    // 第二次请求首条直接成功。这样两个请求的 ring 记录分别是 2 条与 1 条。
+    let hit = 0
+    ctx.llm.stream = async function* (options) {
+      hit += 1
+      if (options.provider === 'commandcode' && hit === 1) {
+        yield { type: 'finish', reason: { kind: 'error', failure: { code: 'NO_ADAPTER', message: 'boom' } } }
+        return
+      }
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text: 'ok' }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    }
+    await drainVia(adapter)
+    await drainVia(adapter)
+
+    const body = invoke(routes[0].handler, ROUTES_PATH).json
+    assert.ok(Array.isArray(body.calls))
+    assert.equal(body.calls.length, 2, '两次请求各一组')
+    assert.deepEqual(body.calls.map((call) => call.call), [2, 1], 'desc:最近一次在前')
+    assert.equal(body.calls[0].outcome, 'ok')
+    assert.equal(body.calls[1].outcome, 'ok')
+    assert.equal(body.calls[1].routes.length, 2, '第一次请求回退了一次 ⇒ 两行')
+    assert.equal(body.calls[1].routes[0].switched, true)
+    assert.equal(body.calls[1].routes[0].code, 'NO_ADAPTER')
+    assert.equal(body.calls[1].routes[0].switchedTo, 'ww/gpt-6-astra')
+    assert.equal(body.calls[1].routes[1].ok, true)
+    assert.equal(body.calls[0].routes.length, 1, '第二次请求首条即成功 ⇒ 一行')
+    // 平铺 routes 与 calls 数据同源
+    assert.equal(body.routes.length, 3)
+    assert.equal(body.total, 3)
   })
 })

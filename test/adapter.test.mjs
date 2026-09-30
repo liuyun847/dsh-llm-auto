@@ -6,6 +6,7 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 import { AutoAdapter, createRing, NO_RETRY_POLICY } from '../lib/index.js'
+import { groupCalls } from '../lib/calls.js'
 import { DEFAULT_CONTEXT_WINDOW } from '../lib/routes.js'
 import { EXHAUSTED_CODE } from '../lib/errors.js'
 import { chunk, drain, makeFakeLlm, successScript } from './helpers.mjs'
@@ -46,6 +47,7 @@ describe('stdout 契约:providerInfo / listModels / resolveModel', () => {
     assert.equal(models[0].provider, 'auto')
     assert.equal(models[0].id, 'auto')
     assert.equal(models[0].name, 'Auto')
+    assert.deepEqual(models[0].inputModalities, ['text', 'image'])
     assert.match(models[0].description, /first\/m1 → second\/m2/u)
   })
 
@@ -66,6 +68,7 @@ describe('stdout 契约:providerInfo / listModels / resolveModel', () => {
     assert.equal(info.provider, 'auto')
     assert.equal(info.id, 'auto')
     assert.equal(info.context.contextWindow, 123456)
+    assert.deepEqual(info.inputModalities, ['text', 'image'])
   })
 
   it('窗口取第一条可解析的路由;全解析不出来时用保守值', async () => {
@@ -405,5 +408,78 @@ describe('路由内重试(默认开启:官方同款策略,每路由最多 5 次�
       chunk.blockStart(0), chunk.text('half'), chunk.textBlockEnd('half'), chunk.usage(),
       chunk.finishError('SERVER', 'upstream died mid-answer', 503),
     ])
+  })
+})
+
+describe('路由日志:call 序号(0.5.0 起,插件页面板按它分组)', () => {
+  it('同一请求的所有记录 call 相同;不同请求自增', async () => {
+    const { adapter, ring } = build({
+      first: () => [chunk.finishError('SERVER', 'boom', 502)],
+      second: () => successScript('from second'),
+    })
+    await drain(adapter.stream(request()))
+    await drain(adapter.stream(request()))
+    const entries = ring.list()
+    // 两次请求:第一次 first×6 + second×1,第二次同样 7 条
+    assert.equal(entries.length, 14)
+    assert.equal(new Set(entries.map((entry) => entry.call)).size, 2, '两个不同的 call')
+    assert.deepEqual(entries.slice(0, 7).map((entry) => entry.call), Array(7).fill(1))
+    assert.deepEqual(entries.slice(7).map((entry) => entry.call), Array(7).fill(2))
+  })
+
+  it('ring → groupCalls 打通:一次请求还原成一条回退路径(面板要的形状)', async () => {
+    const { adapter, ring } = build({
+      first: () => [chunk.finishError('RATE_LIMIT', 'too many requests', 429)],
+      second: () => successScript('from second'),
+    })
+    const { chunks, thrown } = await drain(adapter.stream(request()))
+    assert.equal(thrown, undefined)
+    const calls = groupCalls(ring.list())
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].outcome, 'ok')
+    assert.equal(calls[0].routes.length, 2, '两条候选路由各一行')
+    assert.equal(calls[0].routes[0].tries, 6, '首条 6 次尝试合并成一行')
+    assert.equal(calls[0].routes[0].code, 'RATE_LIMIT')
+    assert.equal(calls[0].routes[0].switchedTo, 'second/m2')
+    assert.equal(calls[0].routes[1].ok, true)
+    assert.deepEqual(chunks, successScript('from second'))
+  })
+})
+
+describe('0.5.2 DeepSeek keepThinking chain integration', () => {
+  function deepseekHistory() {
+    const history = []
+    for (let i = 0; i < 15; i += 1) {
+      history.push(Object.freeze({ role: 'assistant', content: Object.freeze([
+        Object.freeze({ type: 'reasoning', text: `reasoning-${i}` }),
+        Object.freeze({ type: 'text', text: `answer-${i}` }),
+        Object.freeze({ type: 'tool-call', id: `tool-${i}`, name: 'noop', arguments: '{}' }),
+      ]), source: Object.freeze({ provider: 'auto', model: 'auto', replayState: Object.freeze({ response: Object.freeze({ kind: 'pi-ai', version: 2, api: 'openai-completions', provider: 'opencode-go', model: 'deepseek-v4.1-flash' }), blocks: Object.freeze([{ type: 'reasoning' }, { type: 'text' }, { type: 'tool-call' }]) }) }) }))
+      history.push(Object.freeze({ role: 'user', content: Object.freeze([{ type: 'tool-result', toolCallId: `tool-${i}`, content: 'ok' }]) }))
+    }
+    return history
+  }
+  async function run(keepThinking) {
+    let outgoing
+    const { llm } = makeFakeLlm({
+      fallback: () => [chunk.finishError('NO_ADAPTER', 'missing')],
+      'deepseek-official': (options) => { outgoing = options; return successScript() },
+    })
+    const adapter = new AutoAdapter({ llm, routes: [
+      { provider: 'fallback', model: 'broken' },
+      { provider: 'deepseek-official', model: 'deepseek-flash', keepThinking },
+    ], modelName: 'Auto', ring: createRing(20), logger: { info() {}, warn() {}, error() {} }, resolveContextWindow: async () => 1000 })
+    const options = { ...request(), messages: [...deepseekHistory(), Object.freeze({ role: 'user', content: [{ type: 'tool-result', toolCallId: 'last', content: 'ok' }] })] }
+    await drain(adapter.stream(options))
+    return { outgoing, options }
+  }
+  it('15 pi-ai assistant turns + trailing tool result preserve reasoning for enabled DeepSeek route', async () => {
+    const { outgoing } = await run(true)
+    assert.equal(outgoing.messages.filter((message) => message.role === 'assistant').length, 15)
+    assert.ok(outgoing.messages.filter((message) => message.role === 'assistant').every((message) => message.content[0].type === 'reasoning'))
+  })
+  it('same chain without keepThinking strips reasoning by default', async () => {
+    const { outgoing } = await run(undefined)
+    assert.ok(outgoing.messages.filter((message) => message.role === 'assistant').every((message) => message.content[0].type === 'text'))
   })
 })
