@@ -1,7 +1,7 @@
 # dsh-llm-auto
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.4.0-blue.svg)](package.json)
+[![Version](https://img.shields.io/badge/version-0.5.2-blue.svg)](package.json)
 [![DSH Plugin](https://img.shields.io/badge/dsh-plugin-8A2BE2.svg)](https://github.com/topics/dsh-plugin)
 
 给 DSH 加一个 **`auto` 模型**:模型选择器里多出一个 `Auto` 分组,组内一条 `auto`。
@@ -11,6 +11,10 @@
 
 还能把**自动压缩点**钉在你要的位置(`compactWindow`,默认 50 万 token):DSH 的压缩引擎按
 "该请求声明的窗口"算阈值,而本插件的窗口是**按压缩点反算**出来的。
+
+0.5.0 起,插件页那张卡片上还有一块只读的 **`回退链`面板**:当前生效的有序链(第几条是首选、
+重试开不开) + 最近若干次请求**实际**怎么回退的(哪条失败、什么错误码、切给了谁、花了多久)。
+详情见 §2「回退链面板」。
 
 ```
                     ┌─ 用户选了 auto/auto ─┐
@@ -39,7 +43,7 @@
 
 ```bash
 # ① 装进 profile:dshpm 会顺带把包名写进 dsh.profile.bundles
-node C:\Users\MLTZ\Desktop\code\working\dsh-plugin-manager\dshpm.mjs add file:./plugins/dsh-llm-auto --profile web
+node <工作区>\dsh-plugin-manager\dshpm.mjs add file:./plugins/dsh-llm-auto --profile web
 #    公开环境:profile 的 package.json 里加 "dsh-llm-auto": "github:liuyun847/dsh-llm-auto"
 #    再 pnpm install(或 npm install) —— 同样只要包名在 dsh.profile.bundles 里
 
@@ -199,6 +203,44 @@ slot(键 = **本包包名** `dsh-llm-auto`)⇒ 插件页 →「已安装」→ �
   profile 层在包层之后应用 ⇒ 遮蔽包内那行 insert),或直接改包内 `cordis.patch.yml`。
   `routes` 这类结构性配置没有表单,只能走这两条。
 
+### 回退链面板(0.5.0 起,只读)
+
+同一张卡片上、compactWindow 表单**下方**多出一块「回退链」面板:
+
+```
+回退链                                              [刷新]
+按上面的顺序依次尝试;某条重试耗尽、或错误码不允许重试时,才静默切下一条。这里是只读视图。
+
+当前链(第一项即首选)
+1. opencode-go/deepseek-v4.1-flash
+2. commandcode/deepseek/deepseek-v4.1-flash
+3. deepseek-official/deepseek-flash
+每路由最多重试 5 次,退避 500ms→10000ms
+
+最近请求 ............................................ 共 12 条记录,容量 50
+● 14:23:11  4.2s  成功
+    1. opencode-go/deepseek-v4.1-flash   ✕ RATE_LIMIT   试了 5 次   → 切换至 2
+    2. commandcode/deepseek/deepseek-v4.1-flash   ✓ 成功
+● 14:18:02  1.1s  成功
+    1. commandcode/deepseek/deepseek-v4.1-flash   ✓ 成功
+```
+
+- **上半是配置链**:直接取端点的 `chain` 与 `retry`,即**当前生效值** —— `routes` 只能改
+  包内 `cordis.patch.yml`(没有表单),这块面板就是它在界面上的唯一出口;重点是
+  "第几条是首选""重试开不开、退避多少"。
+- **下半是运行时的真实回退**:端点的 `calls` 字段,按**一次 auto 请求**分组(adapter 给
+  每条日志写上本次 `stream()` 的序号 `call`,宿主侧 `lib/calls.js` 的 `groupCalls()` 还原)。
+  同一条路由的多次尝试合并成一行(`试了 N 次`),错误码取该路由的最终失败,
+  `→ 切换至 …` 指向下一条候选。**最近结束**的请求排最上面。
+- **只读**:面板不写任何配置 —— 没有 routes 表单,也不把日志写进任何持久存储。
+- **刷新时机**:组件挂载(进这张卡片)时读一次端点,点「刷新」再读一次;不轮询。
+- **失败有提示而不是空白**:端点非 200 / 网络错误 ⇒ 面板尾部一行"读取失败:原因"
+  (插件没加载、端点不可达时正是这个);链与记录都为空时给空态文案。
+- 路由日志是**进程内内存**,重启即清空 ⇒ 面板读的就是它,重启后"最近请求"从空开始。
+- 备选仍是 curl:`curl http://127.0.0.1:3080/api/llm-auto/routes`(完整字段见 §5)。
+- 面板样式只用主题 `--dsw-*` token(浅色/深色两套随外壳),状态用官方 `StateDot` / `Tag`;
+  文案走本插件的字典命名空间 `llmAutoSettings`(中英双语,与 compactWindow 表单同一份)。
+
 ### 导出 `Config`(= 成为可编辑配置条目),以及它的代价与**效果边界**
 
 0.3.0 起本插件导出一个 schemastery `Config`(`lib/index.js`)。效果是**配置成为宿主的可编辑条目**:
@@ -346,6 +388,129 @@ replay 状态保留 ⇒ pi-ai 走 `replayedAssistant`(它正好校验 `response.
 | 出站 `content` | 62 字符 = 思考 57 + 正文 5(拼接,无分隔符) | **5 字符,与会话正文块 SHA256 一致** |
 | 出站 `reasoning_content` | **空串(长度 0)** | **57 字符,与会话思考块 SHA256 一致** |
 
+### 跨路由历史思考摘除:跨路由的思考**摘掉**,而不是被上游摊成正文(2026-09-28 修复;0.5.2 修正 DeepSeek 原生路由例外)
+
+**症状**:会话中途换过路由时,那批**跨路由**的历史助手消息里,模型自己的思考被当成普通正文
+发给上游 —— 与上一节同款的现象,但成因不同,上一节的修法①对它无效(修法①只救得回**同路由**的历史)。
+
+**成因**:上一节的修法①让历史走 pi-ai 的 `replayedAssistant`;而 `dsh-llm-pi-ai` 只会为
+**同一条路由**的历史走这条路,跨路由的历史走另一条分支 —— pi-ai 的 `transform-messages.js:66-90`
+对"历史消息的模型 ≠ 本次请求模型"的助手消息执行 `return { type:'text', text: block.thinking }`
+(`:87-90`),思考块被**降级成正文**。判据是 `provider + api + model` **三者全等**
+(`transform-messages.js:68-70`),而当前链上 3 条路由的 provider 互不相同 ⇒
+**任何**中途切换都必然走降级分支(把某条路由移出链只是换个受害者)。
+
+抓包实测(同一份历史两跑):跨路由臂那条历史消息出站是
+`keys=[role,content]`、`content` 长 145 = 思考 124 + 真答案 21(**零分隔符**)、没有任何独立思考字段;
+同路由对照臂 `content` 只有真答案 17 字符、思考 124 字符在 `reasoning_content` 里。
+后果不是"少一段上下文",而是**模型把内心独白学成正文格式**,整场会话此后思考全进正文且不可自愈。
+
+**修法**:在换 provider 的那一刻(`adapter.js` 的 `#nestedOptions`)把跨路由历史助手消息的
+`reasoning` 块从 **`content` 与 `replayState.blocks` 两侧同位同步摘掉**(`lib/replay.js` 的
+`restoreMessageSource` / `stripReasoning`):
+
+```
+跨路由的历史助手消息
+  content:            [reasoning, text, tool-call]   ─┐ 同位摘掉 reasoning
+  replayState.blocks: [reasoning, text, tool-call]   ─┘ (两侧必须同步)
+                     ↓
+  content:            [text, tool-call]
+  replayState.blocks: [text, tool-call]      ← dsh-llm-pi-ai 的等长校验仍然通过
+```
+
+**为什么必须两侧同步摘**:`dsh-llm-pi-ai` 的 `replayedAssistant` 有四条校验
+(`lib/index.js:185`/`:186`/`:187`/`:192`),其中 `:187` 比的是 `replayState.blocks.length` 与
+`message.content.length` **逐条等长**、`:192` 比逐条同型。只摘 `content` 一侧 ⇒ `:187` 抛
+`INVALID_REPLAY_STATE` ⇒ `toPiAssistant`(`:240-252`)把**整条**降级成 `foreignAssistant`,
+而那条路径会把残留的 `reasoning` 原样映射成 `thinking`(`:154-158`)、并把 `api` 打成
+`"dsh-foreign"` ⇒ pi-ai 的 `isSameModel` 必为假 ⇒ 思考**照样**被摊成正文。
+也就是说**只摘一侧 = 缺陷原样复发 + 多一条 degrade 日志**(日志文案见 §8);
+同位摘 k 项 ⇒ 两侧各减 k ⇒ 等长与逐条同型都仍然成立。
+
+**边界(哪些动、哪些不动)**:
+
+| 情形 | 行为 |
+| --- | --- |
+| 跨路由的历史助手消息 | `content` 与 `replayState.blocks` 同位摘 `reasoning` |
+| **同路由**的历史 | **一个字都不动** —— 那是唯一能让 pi-ai 带签名原样回放的路径(`transform-messages.js:80-81` 要求 `isSameModel && thinkingSignature`),摘了等于把 2026-09-24 的收益还回去 |
+| 摘完全空的消息(这条消息本来只有思考) | **整条消息从请求里去掉** —— 不给上游一个空 `content` 的助手消息(`dsh-llm-deepseek` 的序列化只跳过空 user 消息,空助手消息会原样发出去;该条路由对空 `content` 助手消息的真实反应**未测**,本机实施记录里列为"未验证项") |
+| `replayState.blocks` 与 `content` 对不齐(缺 `blocks`、长度或类型已错位) | 摘 `content` 并**丢掉整个 `replayState`**(不交半截信封);与宿主自己的做法一致 —— `BlockAssembler` 在 blocks 对不上时就是 `replay: undefined`(`@deepseek-ai/dsh-llm/lib/index.js:1060-1063`) |
+| 非助手消息、`source` 缺失、路由值不是非空字符串 | 原样放行,不抛错(交给下游适配器自己校验/降级) |
+| 目标路由 keepThinking: true | 跨路由思考不摘除;用于 DeepSeek thinking 模式的工具循环。未设置/false 仍照常摘除 |
+| DeepSeek Messages 信封缺 provider | 通知与摘除按 model 判同异;source 不伪造 provider,通知标签只显示 model |
+| 调用 `restoreReplaySources(options)`(不传 route) | 退化为旧行为:只改 `source`,不摘思考 |
+
+**代价(有意的取舍)**:跨路由的思考从此"看不见"了。现状是"看得见但被误导",改后是"看不见"。
+跨路由时思考的签名已经无效(`thoughtSignature` 跨模型即删),保真价值接近零;
+丢弃只损失一点上下文,而污染会改掉整场会话的格式。这一层与 pi-ai 自己的先例同向:
+`transform-messages.js:72-77` 对跨模型的 `redacted` 思考就是直接丢弃。
+
+**复发路径与兜底**:唯一现实的复发路径是上游把 `readReplayState` 加严、或把 `version` 升到 3
+—— 那时**同路由**的消息也会走 `foreignAssistant`,而本插件"同路由 ⇒ 保留思考"的判断就成了帮凶。
+兜底做法是在"保留"分支上加一个自证可用的前置检查(`version === 2 && blocks 与 content 同位同型`);
+**本次有意不加**(它把上游校验复制进插件,且现有用例里没有对应失败场景)。
+日后升级 DSH/pi-ai 时,先跑设计阶段的用例 1/2/11 再决定。
+
+### 路由切换通知:静默切换也告诉模型"上面那些回合是别的模型生成的"(0.5.1 起;0.5.2 支持 DeepSeek 信封)
+
+DSH 自带的那条 `[model changed: …]` 只在用户**手动换模型**时追加
+(`@deepseek-ai/dsh-agent/lib/index.js:133-147` 的 `modelSwitchNotice`,由 `agent/pre-step`
+瀑布注入,且会落进会话记录)。`auto` 的切换是**静默**的,模型在毫无提示的情况下看到一堆
+"内心独白式正文",更容易把坏格式学下去 ⇒ 本插件在**本次请求真的发生了切换**时,
+在出站消息序列**末尾**追加一条同款通知。
+
+**措辞与标签规则**(逐字复刻自带通知,`routeLabel` = `dsh-agent/lib/index.js:130-132`):
+
+```
+[model changed: assistant turns above this point were generated by <来源>; the session continues with <目标>]
+```
+
+| 标签 | 规则 |
+| --- | --- |
+| `<来源>` / `<目标>` | provider 相同就只写 `model`,否则写 `provider/model` |
+| 注意 | 两侧各按**对方**判一次(`routeLabel(旧, 新)` / `routeLabel(新, 旧)`),所以 provider 不同时两个标签**都会**带 provider 前缀 |
+
+**追加在末尾而不是插在那批回合之后**:措辞是 "assistant turns above this point",放在末尾时
+"上面"正好包含全部历史回合,措辞仍然准确;插进历史中间会让 `messages` 的下标与其它改写逻辑
+(以及宿主自己"内容块与 replay 块逐条同位"的不变式)纠缠。
+
+**触发条件(三条全中才追加)**:
+
+1. 有历史助手消息,且它的 `replayState.response` 给出可用路由
+   (取不到时**不发通知** —— 判不出"上面那些回合是哪个模型生成的"就不能声称发生了切换;
+   宁可不发,也不发一条每回合都出现的假通知。这不是常态:会话里每条经 `auto` 产出的助手消息
+   都带 replay 状态 —— `dsh-llm-pi-ai` 的 `toPiReplayState` 与 `dsh-llm-deepseek` 的
+   `replayState()` 都是每次产出必写,而外层 `forAdapter` 对 `source.provider === 'auto'`
+   的消息本来就原样保留 replay);
+2. 本次候选路由与它**不同**(比 `provider` + 重建后的 `model`(信封无 provider 时仅比 model),与摘思考同一套口径
+   —— 见上节;`api === 'anthropic-messages'` 时 pi-ai 用的是 `responseModel`,
+   重建规则见 `dsh-llm-pi-ai/lib/index.js:218`);
+3. 历史里**没有**已覆盖本次切换的通知(见下)。
+
+候选路由在 `adapter.js` 的链循环里定,`#nestedOptions(options, route)` **每次尝试都重算**,
+且每次尝试都从**原始** `options` 重新派生(不是从上一次尝试的结果接着改)⇒ 失败路由的尝试
+不会把摘除结果或通知带进下一次尝试的负载;只有真正成功那条的负载会被上游看到,
+所以"逐次尝试各自判定"与"链上第一个成功的路由 ≠ 上一条助手消息的路由"等价。
+
+**只改出站负载**:通知只加在交给嵌套调用的**请求副本**里,**绝不写进会话记录**
+(与上节"只改出站、不改落盘"同一口径);会话记录由 DSH 自己的机制管。
+通知消息本身是用户角色、深冻结,`source` 带同款标记(`kind: 'model-selection'` /
+`form: 'notice'`);**不带 `id`** —— 出站请求消息不需要稳定身份,省略也让出站负载可预测、可测
+(自带那条由 `createUserMessage` 造,会带一个随机 uuid)。
+
+**去重规则(`hasCoveringNotice`)**:历史里若已有一条"覆盖本次切换"的通知就不再追加。
+两条判据**同时**成立才算覆盖:
+
+| # | 判据 | 为什么 |
+| --- | --- | --- |
+| 1 | **位置**:它出现在**最后一条助手消息之后** | 自带通知里的 "assistant turns above this point" 是位置相关的 —— 只有紧跟在我们要标注的那批回合之后,它说的才是同一批回合;更早的那条说的是更早的回合,不能拿它顶账 |
+| 2 | **来源**:它的措辞里 "generated by `<来源标签>`;" 这一段与本次要写的来源路由一致 | 即模型已经被明确告知"上面那些回合是 `<来源>` 生成的" |
+
+只比这两条、**不比目标标签**:自带通知的目标写的是**选择**(`auto`),我们写的是**真实路由**,
+两者天然不同字;而"上面那些回合是别的模型生成的"这层意思,来源标签就是它的全部信息量。
+比**前缀**而不比整句,是为了对 `boundContextSummary` 的截断(自带那条的 `summary` 会被截到
+120 字符)保持稳健 —— 正文本身不截断,但只依赖前缀更不容易被上游改坏。
+
 ### 空响应也算失败
 
 上游"正常结束但一条内容都没有"(`finish{kind:'stop'}` 且零内容)被当作 `EMPTY_RESPONSE` 处理:
@@ -445,6 +610,13 @@ GET /api/llm-auto/routes?limit=N      # limit 省略/非法 = 不限(以容量�
   "retry": { "mode": "normal", "maxRetries": 5, "retryableCodes": ["EMPTY_RESPONSE", "RATE_LIMIT", "SERVER", "TIMEOUT", "TRANSPORT"], "initialDelayMs": 500, "maxDelayMs": 10000, "jitterRatio": 0.1 },
   "compactWindow": 500000, "declaredContextWindow": 625000,
   "chain": ["commandcode/deepseek/deepseek-v4.1-flash", "stepfun/step-5-preview", "deepseek-official/deepseek-flash"],
+  "calls": [
+    { "call": 12, "at": "2026-09-23T13:03:51.518Z", "elapsedMs": 3100, "outcome": "ok",
+      "routes": [
+        { "attempt": 1, "provider": "commandcode", "model": "deepseek/deepseek-v4.1-flash", "tries": 5, "ok": false, "code": "SERVER", "reason": "SERVER(502): 502 status code", "elapsedMs": 1200, "switched": true, "switchedTo": "stepfun/step-5-preview" },
+        { "attempt": 2, "provider": "stepfun", "model": "step-5-preview", "tries": 1, "ok": true, "code": null, "reason": null, "elapsedMs": 1900, "switched": false, "switchedTo": null }
+      ] }
+  ],
   "capacity": 50, "total": 2,
   "routes": [
     { "at": "2026-09-23T13:03:49.516Z", "attempt": 1, "try": 1, "provider": "probe-no-such-provider",
@@ -463,6 +635,12 @@ GET /api/llm-auto/routes?limit=N      # limit 省略/非法 = 不限(以容量�
 `willRetry`(存在且为 true 表示这条失败后还会重试,不是终态)、`provider`/`model`(命中的路由)、
 `ok`(是否成功)、`switched`(这次失败是否触发了切换)、`elapsedMs`(耗时)、`code`/`reason`(失败原因摘要)。
 顶层 `retry` 是当前生效的重试策略(排查"它为什么重试/为什么不重试"先看这个)。
+
+顶层 `calls` 是 0.5.0 加的**分组视图**(插件页面板读的就是它):同一份记录按一次
+`stream()` 调用(`call` 字段)归组,`outcome` 为 `ok` / `failed` / `aborted`,
+`routes` 里同一条候选路由的多次尝试合并为一行(`tries` 次尝试、`code`/`reason` 取最终失败、
+`elapsedMs` 为该路由内的耗时之和),`switchedTo` 指向同组下一条候选。`?limit=N` 只切
+**记录条数** ⇒ 分组后最旧那一组可能被截断(同一次请求的前半段已被环形缓冲淘汰)。
 
 顶层 `compactWindow` / `declaredContextWindow` 是**窗口口径的事后复核字段**:前者是生效的压缩点
 (没启用映射时为 `null`),后者是当前对外声明的窗口(逐跳解析口径下,要等第一次目录解析才有值,
@@ -501,8 +679,11 @@ GET /api/llm-auto/routes?limit=N      # limit 省略/非法 = 不限(以容量�
 - **插件卸载不 drain 在飞退避**:cordis 卸载本插件时,正在进行的退避(≤10s)会自然完成,不像官方
   `dsh-llm-retry` 有 lifetime abort + drain(它挂在 agent loop 上,拿得到 session 生命周期)。
 - **不做视觉/长上下文分流**:上游同类插件按"含图 / 超长"分流,本插件按用户明确要求只做失败重试/回退。
-- **不声明 `inputModalities`**:目录里不宣称"支持图片"。"能不能收图"交给真正被选中的那条路由决定;
-  声明了反而会让运行时按声明去投影请求(把图片换成占位文本)。
+- **声明 `inputModalities: ['text','image']`(2026-09-27 起;此前有意留空)**:留空等于对所有调用方
+  宣称"不支持图片"——`read_image`(dsh-tool-fs)与 MCP 图像回传(dsh-mcp-client)的能力门禁都是
+  "未声明即拒",于是 `auto` 路由下连截图都读不了。曾担心的投影副作用不成立:投影发生在每次
+  `llm.stream()` 的适配器边界,嵌套调用会按**内层真实路由**再判一次 ⇒ 链路里若有纯文本模型,
+  图片仍会在那一层被换成占位文本。前提是链路全部候选都收图。
 - **`reasoningEffort` 一律用该路由可用的最高强度**(2026-09-23 用户指定):每跳前问一次该路由
   `resolveModelInfo` 的 `reasoning.efforts`,取**最后一项**(DSH 的档位强度序固定为
   `off→minimal→low→medium→high→xhigh→max`,适配器只保留该模型支持的档位 ⇒ "最后一项"就是它
@@ -514,9 +695,13 @@ GET /api/llm-auto/routes?limit=N      # limit 省略/非法 = 不限(以容量�
   这正是上面「历史回放」一节修的缺陷:剥掉后 pi-ai 会把思考摊平进正文、把 `reasoning_content`
   填成空串。本插件在嵌套调用前把 source 改回 replay 记录的真实路由来保住它;历史消息若本来就来自
   `commandcode`,回退到同属 pi-ai 的 `ww` 时 replay 会被保留 —— 那是上游既有行为(手动切模型时
-  同样发生)。**跨模型**的历史(replay 路由 ≠ 本次路由)仍然会被 pi-ai 摊平,这是 pi-ai 自己的策略
-  (思考签名跨模型不可信),与直连时的行为一致。
+  同样发生)。**跨模型**的历史(replay 路由 ≠ 本次路由)本来也会被 pi-ai 摊平(它的策略是"思考签名跨模型
+  不可信",与直连时一致);本插件 2026-09-28 起改为**主动把跨路由的思考块摘掉**(见 §3「跨路由历史思考摘除」),
+  不再让它以正文形态出现 —— 这是有意的取舍:跨路由的思考不再可见,换掉的是"整场会话的格式被污染"。
 - **路由日志是进程内内存**,重启即清空,不适合当审计账本。
+- **回退链面板的数据来源就是这份内存缓冲**(0.5.0):进程内没有对应路由活动时"最近请求"为空;
+  换一次浏览器/刷新页面不会丢(数据在宿主侧),但重启会。端点非 200 或插件未加载时面板显示
+  "读取失败:原因",不是空列表。
 - **压缩点靠"声明窗口"间接控制,依赖引擎默认常量**:`compactWindow` 的反算写死了
   `thresholdRatio = 0.8` / `headroomTokens = 65536`,并按 `reserved = 0` 推算。若把
   `@deepseek-ai/dsh-compaction-basic` 的 `thresholdRatio`/`headroomTokens` 改成别的值、
@@ -547,13 +732,15 @@ node --test "test/*.test.mjs"     # 注意:Node 24 起 `node --test test/` 不�
 
 | 文件 | 覆盖 |
 | --- | --- |
-| `test/routes.test.mjs` | `normalizeRoutes`(空/非数组/自递归/重复/单条坏条目)、`describeChain`、`createRing`(定长 + 取值函数容量) |
+| `test/routes.test.mjs` | `normalizeRoutes`(含 `keepThinking` 布尔透传、坏类型 warn 回落;空/非数组/自递归/重复/单条坏条目)、`describeChain`、`createRing`(定长 + 取值函数容量) |
 | `test/compact.test.mjs` | **压缩点反算**:500000→625000、边界值表(12484 / 262143 / 262144 / 327680 / 884000 / 1000000…)、1~300 万抽样"阈值处处精确等于 T"(独立复刻一遍引擎的 `resolveCompactSpec` 来验算)、最小可用值 12484 的推导;`planDeclaredWindow` 的优先级/同时给出/非法回落/过小警告/null 与坏类型;`unwrapVolatile`;`describeWindowPlan` 四种文案;导出的 `Config`(六键中文 description、`compactWindow` 默认 500000 且 volatile、routes/retry 坏值不失败、真 schema 走一遍⇒解包后仍是 500000⇒625000) |
 | `test/retry.test.mjs` | `normalizeRetry` 全部分支(缺省/布尔/对象/always/坏值回落)、`computeRetryDelay`(官方口径序列与 jitter 边界)、`describeRetryPolicy` |
-| `test/adapter.test.mjs` | 首次成功、首条瞬时失败后先重试再回退、全部失败聚合(带尝试次数)、**已产出内容后失败不重试不回退**、暂存分片、空响应(可重试)、不可回退码、取消、退避中取消、上游抛异常、按路由取最高推理档位、窗口解析、`modelName` 取值函数;重试块另覆盖:第 N 次成功、白名单外不重试、`maxRetries: 0` 旧行为、`Retry-After` 界内优先/超界直切、退避序列 500/1000/2000/4000/8000 |
-| `test/replay.test.mjs` | `restoreReplaySources`:路由不同 ⇒ 改写且 `content` 逐字未变、路由相同/无 `replayState`/形状不对 ⇒ 原样放行不抛、非助手消息不动、多条各按自己的 replay 路由改写、冻结输入不被破坏;外加一条接线用例:经 `AutoAdapter.stream()` 的嵌套请求确实拿到了改写后的 source |
+| `test/adapter.test.mjs` | 0.5.2 新增 15 条 pi-ai 助手历史 + 工具结果结尾时,DeepSeek `keepThinking` 开/关的链级差异;首次成功、首条瞬时失败后先重试再回退、全部失败聚合(带尝试次数)、**已产出内容后失败不重试不回退**、暂存分片、空响应(可重试)、不可回退码、取消、退避中取消、上游抛异常、按路由取最高推理档位、窗口解析、`modelName` 取值函数;重试块另覆盖:第 N 次成功、白名单外不重试、`maxRetries: 0` 旧行为、`Retry-After` 界内优先/超界直切、退避序列 500/1000/2000/4000/8000 |
+| `test/replay.test.mjs` | `restoreReplaySources`:路由不同 ⇒ 改写且 `content` 逐字未变、路由相同/无 `replayState`/形状不对 ⇒ 原样放行不抛、非助手消息不动、多条各按自己的 replay 路由改写、冻结输入不被破坏;外加一条接线用例:经 `AutoAdapter.stream()` 的嵌套请求确实拿到了改写后的 source。2026-09-28 起同文件再覆盖**跨路由思考摘除**(两侧同步摘、只摘一侧 ⇒ 等长校验失败的反例、摘空 ⇒ 整条去掉、信封对不齐 ⇒ 丢 `replayState`、同路由零改动、anthropic 的 `responseModel` 重建规则)与**路由切换通知**(切换才追加、已有覆盖通知不重复、标签规则、只进嵌套请求),共 49 例;全套 **184 例**(改动前 144 例) |
 | `test/runtime-integration.test.mjs` | 用**真实** `LlmRuntime` + **真实** `@deepseek-ai/dsh-llm/invariant` 跑端到端:目录校验、回退后的流语法零违规、**重试后成功的流语法零违规**、`maxRetries: 0` 旧行为、聚合错误的终止分片、注销后路由立刻消失 |
 | `test/endpoint.test.mjs` | `apply()` 的注册/拒绝注册分支、`provider: auto` 跳过、HTTP 端点响应、`retry` 默认值/关闭/坏值回落;`compactWindow` 的映射/宿主形态/与 `contextWindow` 同时给出/非法回落/过小警告、**volatile 引用改值后不重启即生效**(name / compactWindow / logLimit)、端点复核字段 |
+| `test/calls.test.mjs` | `groupCalls`:坏输入、按 `call` 分组、同 attempt 合并(`tries`/最终失败/耗时求和/`switchedTo`)、三种 `outcome`、`order` 与 `maxCalls`、desc 按**请求结束**排序、没有 `call` 的旧记录降级分组 |
+| `test/client.test.mjs` | 浏览器半侧的纯函数(桩 `window.__ModuleLoader__` 后手动调 `factory(require)`):模块契约、`fill`/`tr`(对 t 的插值实现不敏感)、`retrySummary`、`formatClock`/`formatDuration`、结局→状态点/标签。**不覆盖渲染** —— 那部分靠真机(见 §7 末尾) |
 
 `runtime-integration` 是这套测试里最值钱的一个:它把"我的输出能不能被宿主接受"也钉住了 ——
 尤其是"回退时不能出现重复 `block-start` / 重复 `usage`"这条,只有跑真实校验器才测得出来。
@@ -582,8 +769,13 @@ node --test "test/*.test.mjs"     # 注意:Node 24 起 `node --test test/` 不�
 | 日志出现 `TargetPressureConfigError`(`retainTokens ... must be less than threshold tokens`) | `compactWindow` 太小(< 12484,挂载时已有 warn)或旧键 `contextWindow` ≤ 65536;把 `compactWindow` 调到 ≥ 12484 即可 |
 | 设置了 `contextWindow` 但窗口没变 | 预设里 `compactWindow` 已有值(默认 500000)⇒ 按优先级以 `compactWindow` 为准,挂载日志有一条 warn 点名两者;要用旧键就先把 `compactWindow` 从配置里删掉 |
 | 插件页看不到本插件的配置表单 | 本包 0.4.0 起自带浏览器半侧、注册进 `plugins.bundle.config`(键 = 包名 `dsh-llm-auto`,渲染在卡片描述与行之间)。没看到先分清两种原因:①宿主还在跑 0.4.0 之前的代码 —— 半侧新增后**必须重启一次 dsh**(见 §1),HMR 不会重新扫描(`dsh-client-modules` 把"本包不是客户端包"的否定结论按 specifier 缓存在 `pkgMeta`,其 `lib/index.js:510/703`);②只是刚改过 `lib/client.js` —— 这条 HMR 路径实测不生效,同样要重启(见 §4 第 2 条)。另:本插件**故意不再**注册 `plugins.row.config`,所以行 `llm-auto` 上没有「配置」控件是正常的;`routes`/`retry` 本来就没有表单,故意留在**包内** `cordis.patch.yml` 里 |
-| 经 `auto` 的历史思考跑到正文里、思考通道是空的 | 插件是修复前的版本(宿主还在跑旧代码);修复见 §3「历史回放」,改完两份并重启后消失 |
-| 日志出现 `llm-pi-ai: unusable replay state on assistant history` | 那条历史消息的 replay 状态与本次路由不匹配(例如跨模型回放),pi-ai 主动降级成 provider-neutral 内容;这是上游既有行为,不是本插件的错误 |
+| 插件页看不到「回退链」面板 / 上面写着"读取失败" | 面板与 compactWindow 表单是同一个客户端半侧(0.5.0 新增 ⇒ 同样要重启一次 dsh 才被收录);若是"读取失败:…",先用 `curl http://127.0.0.1:3080/api/llm-auto/routes` 复核端点本身 —— 插件没加载、被停机或 bind 到非回环地址时就是这个文案 |
+| 「最近请求」是空的 | 路由日志是进程内内存(重启清零,见 §6);也可能还没有请求走过 `auto`:模型选择器选一次 `Auto` 再发一条消息 |
+| 经 `auto` 的历史思考跑到正文里、思考通道是空的 | 插件是修复前的版本(宿主还在跑旧代码);修复见 §3「历史回放」与「跨路由历史思考摘除」,改完两份并重启后消失。若已确认代码是修好的、这个现象还在 ⇒ 多半是**宿主没重启**(loader 按 URL 缓存已 import 的模块) |
+| 日志出现 `llm-pi-ai: unusable replay state on assistant history` | 那条历史消息的 replay 状态与本次路由不匹配(例如跨模型回放),pi-ai 主动降级成 provider-neutral 内容;这是上游既有行为,不是本插件的错误。**0.5.1 起还有一条专属成因**:只摘了 `content` 一侧的思考而没有同步摘 `replayState.blocks` ⇒ `replayedAssistant` 的等长校验不过 ⇒ 整条降级(§3「跨路由历史思考摘除」的"只摘一侧 = 缺陷原样复发") |
+| 跨路由的历史思考"不见了" | 默认(`keepThinking` 缺省/false)是**有意**的:跨路由的思考块被同位摘掉,不再被 pi-ai 摊进正文(见 §3)。想复核是不是真发生了:抓一次出站请求,跨路由臂的历史助手消息应当**既没有** `reasoning_content`、`content` 里也**不再**混着思考文本(与 §3 那对实测数字同口径) |
+| DeepSeek 目标路由报 `content[].thinking` 必须回传 | 检查目标 `routes[i]` 是否显式设 `keepThinking: true`;该选项只对该条目标路由生效,默认仍照摘 |
+| 想知道静默切换有没有通知模型 | 通知只加在**出站**请求里、不落盘,所以会话记录里看不到它属正常。抓包复核:跨路由臂的 `messages` 末尾多一条 `role: "user"`、正文是 `[model changed: assistant turns above this point were generated by …]`;同路由臂**不该**有这条(§3「路由切换通知」) |
 | 上下文窗口明显偏小 | `contextWindow` 没配且首选路由解析不到窗口,回落到了保守值 65536;显式配一个即可 |
 
 ## License

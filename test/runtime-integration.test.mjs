@@ -86,11 +86,13 @@ describe('真实 LlmRuntime + 真实流语法不变式', () => {
     assert.equal(models.length, 1)
     assert.equal(models[0].id, 'auto')
     assert.equal(models[0].name, 'Auto')
+    assert.deepEqual(models[0].inputModalities, ['text', 'image'])
 
     const info = await llm.resolveModelInfo('auto', 'auto')
     assert.equal(info.provider, 'auto')
     assert.equal(info.id, 'auto')
     assert.equal(info.context.contextWindow, 4096)
+    assert.deepEqual(info.inputModalities, ['text', 'image'])
   })
 
   it('首选成功:分片逐条一致,且不变式零违规', async () => {

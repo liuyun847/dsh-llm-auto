@@ -72,12 +72,9 @@
 # ⚠ `deepseek-official` 靠 DEEPSEEK_API_KEY 解析(本机在**用户级环境变量**里, 已实测有效);
 #   环境变量只在宿主启动时读入 ⇒ 宿主早于该变量设置而启动时该跳报 MISSING_CREDENTIAL, 重启即修。
 #
-# ── 链路与依据(2026-09-24 17:35 用户改定)────────────────────────────────────
-#   OpenCode Go → StepFun → Command Code → DeepSeek 官方。要点:
+# ── 链路与依据(2026-09-24 17:35 用户改定;2026-09-30 按用户要求摘掉 StepFun)──────
+#   OpenCode Go → Command Code → DeepSeek 官方。要点:
 #   · 首选与 agent-default-model 同源(都是 opencode-go),选不选 auto 行为一致。
-#   · StepFun 插第 2 位:端点实测 200/1.0~1.8s(推理题 4~7s);provider 级 `reasoning` 只能写
-#     该模型声明过的档位(off/low/medium/high)—— 写 max 会让这条路由**每个**请求都抛
-#     UNSUPPORTED_REASONING_EFFORT(pi-ai resolveReasoningLevel);跨 provider 档位不串。
 #   · Command Code 额度耗尽时每条都 QUOTA 400(不在瞬时白名单 ⇒ 一次败就切,代价仅这一次撞)。
 #   · 两条 DeepSeek Flash 的 model id **不同源**:opencode-go 那条不带 `deepseek/` 前缀,
 #     commandcode 那条带前缀。写错会以 UNKNOWN_MODEL 一次败就切,不报错也不停 ——
@@ -90,9 +87,8 @@
       config:
         routes:
           - { provider: opencode-go, model: deepseek-v4.1-flash }
-          - { provider: stepfun, model: step-5-preview }
           - { provider: commandcode, model: deepseek/deepseek-v4.1-flash }
-          - { provider: deepseek-official, model: deepseek-flash }
+          - { provider: deepseek-official, model: deepseek-flash, keepThinking: true } # DeepSeek thinking 模式要求工具循环逐条回传思考块
         # 压缩点(默认值就是 500000,写出来只是显式化)
         # compactWindow: 500000
         # retry 不写 = 官方默认(每路由 5 次重试)。要关掉或改参数再放开下面:

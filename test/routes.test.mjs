@@ -113,3 +113,24 @@ describe('createRing', () => {
     assert.ok(Number.isInteger(DEFAULT_CONTEXT_WINDOW) && DEFAULT_CONTEXT_WINDOW > 0)
   })
 })
+
+describe('normalizeRoutes: keepThinking', () => {
+  it('布尔值透传;非布尔值 warn 并回落缺省', () => {
+    const { routes, skipped } = normalizeRoutes([
+      { provider: 'a', model: 'one', keepThinking: true },
+      { provider: 'b', model: 'two', keepThinking: false },
+      { provider: 'c', model: 'three', keepThinking: 'yes' },
+      { provider: 'd', model: 'four', keepThinking: 1 },
+      { provider: 'e', model: 'five', keepThinking: null },
+    ])
+    assert.deepEqual(routes, [
+      { provider: 'a', model: 'one', keepThinking: true },
+      { provider: 'b', model: 'two', keepThinking: false },
+      { provider: 'c', model: 'three' },
+      { provider: 'd', model: 'four' },
+      { provider: 'e', model: 'five' },
+    ])
+    assert.equal(skipped.length, 3)
+    assert.ok(skipped.every((item) => /keepThinking/u.test(item.reason)))
+  })
+})
