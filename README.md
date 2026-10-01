@@ -1,7 +1,7 @@
 # dsh-llm-auto
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.5.2-blue.svg)](package.json)
+[![Version](https://img.shields.io/badge/version-0.5.3-blue.svg)](package.json)
 [![DSH Plugin](https://img.shields.io/badge/dsh-plugin-8A2BE2.svg)](https://github.com/topics/dsh-plugin)
 
 给 DSH 加一个 **`auto` 模型**:模型选择器里多出一个 `Auto` 分组,组内一条 `auto`。
@@ -437,6 +437,7 @@ replay 状态保留 ⇒ pi-ai 走 `replayedAssistant`(它正好校验 `response.
 | `replayState.blocks` 与 `content` 对不齐(缺 `blocks`、长度或类型已错位) | 摘 `content` 并**丢掉整个 `replayState`**(不交半截信封);与宿主自己的做法一致 —— `BlockAssembler` 在 blocks 对不上时就是 `replay: undefined`(`@deepseek-ai/dsh-llm/lib/index.js:1060-1063`) |
 | 非助手消息、`source` 缺失、路由值不是非空字符串 | 原样放行,不抛错(交给下游适配器自己校验/降级) |
 | 目标路由 keepThinking: true | 跨路由思考不摘除;用于 DeepSeek thinking 模式的工具循环。未设置/false 仍照常摘除 |
+| 目标路由 breakToolLoop: true | 出站以**工具结果**结尾、且历史里存在"带工具调用却没有思考块"的助手消息时,末尾追加一条用户提示,把请求改成"以用户消息结尾" —— 绕开 DeepSeek thinking 模式的工具循环校验。未设置/false 不追加(见下一节) |
 | DeepSeek Messages 信封缺 provider | 通知与摘除按 model 判同异;source 不伪造 provider,通知标签只显示 model |
 | 调用 `restoreReplaySources(options)`(不传 route) | 退化为旧行为:只改 `source`,不摘思考 |
 
@@ -450,6 +451,33 @@ replay 状态保留 ⇒ pi-ai 走 `replayedAssistant`(它正好校验 `response.
 兜底做法是在"保留"分支上加一个自证可用的前置检查(`version === 2 && blocks 与 content 同位同型`);
 **本次有意不加**(它把上游校验复制进插件,且现有用例里没有对应失败场景)。
 日后升级 DSH/pi-ai 时,先跑设计阶段的用例 1/2/11 再决定。
+
+### 工具循环收尾:历史缺思考时,别让请求以工具结果结尾(0.5.3 新增)
+
+**症状**:兜底到 DeepSeek 原生路由时,工具循环第二轮必失败,整条请求被拒:
+`The content[].thinking in the thinking mode must be passed back to the API`(HTTP 400)。
+
+**根因与"摘思考"不是一回事**:那一回的思考**不是被摘掉的、是从来没有** —— 会话前段由别的路由
+(现场是 `opencode-go`)产出,那些回合的上游响应里本就没有 reasoning 分片,`keepThinking: true`
+无从保留。DeepSeek 在 thinking 模式下对**工具循环**有硬校验:请求以 `tool` 结果结尾时,
+历史里带工具调用的助手消息必须把思考一并回传。
+
+**修法**:目标路由声明 `breakToolLoop: true` 后,满足下面两个附加条件时,在出站消息**末尾追加一条
+用户角色的提示**(正文 `[tool loop notice: …]`),把请求形态从"以工具结果结尾"改成"以用户消息结尾"。
+
+| 条件 | 为什么 |
+| --- | --- |
+| 目标路由 `breakToolLoop: true` | 显式开关,不猜 provider 语义 |
+| 出站消息以 `tool` 结果结尾 | 不处在这个形态就没有校验点 |
+| 历史里存在"带工具调用却没有思考块"的助手消息 | 否则纯属打扰 |
+
+**与路由切换通知互斥**:两者都追加在末尾、都是用户角色。切换通知先落地时末尾已不是工具结果,
+本提示自然不追加 —— 这正好解释了 2026-10-01 现场"第 113 步侥幸成功、第 114 步才炸"的现象
+(那一步的切换通知替它挡了一次)。
+
+**代价**:提示只存在于**出站副本**里(不落盘),所以每轮都会重新追加一条;模型会看到一句
+"上面有些回合没有思考记录,请从工具结果接着做"。这是有意的取舍 —— 相比整条请求被 400 拒绝,
+多一句话是更小的代价。
 
 ### 路由切换通知:静默切换也告诉模型"上面那些回合是别的模型生成的"(0.5.1 起;0.5.2 支持 DeepSeek 信封)
 
@@ -736,7 +764,7 @@ node --test "test/*.test.mjs"     # 注意:Node 24 起 `node --test test/` 不�
 | `test/compact.test.mjs` | **压缩点反算**:500000→625000、边界值表(12484 / 262143 / 262144 / 327680 / 884000 / 1000000…)、1~300 万抽样"阈值处处精确等于 T"(独立复刻一遍引擎的 `resolveCompactSpec` 来验算)、最小可用值 12484 的推导;`planDeclaredWindow` 的优先级/同时给出/非法回落/过小警告/null 与坏类型;`unwrapVolatile`;`describeWindowPlan` 四种文案;导出的 `Config`(六键中文 description、`compactWindow` 默认 500000 且 volatile、routes/retry 坏值不失败、真 schema 走一遍⇒解包后仍是 500000⇒625000) |
 | `test/retry.test.mjs` | `normalizeRetry` 全部分支(缺省/布尔/对象/always/坏值回落)、`computeRetryDelay`(官方口径序列与 jitter 边界)、`describeRetryPolicy` |
 | `test/adapter.test.mjs` | 0.5.2 新增 15 条 pi-ai 助手历史 + 工具结果结尾时,DeepSeek `keepThinking` 开/关的链级差异;首次成功、首条瞬时失败后先重试再回退、全部失败聚合(带尝试次数)、**已产出内容后失败不重试不回退**、暂存分片、空响应(可重试)、不可回退码、取消、退避中取消、上游抛异常、按路由取最高推理档位、窗口解析、`modelName` 取值函数;重试块另覆盖:第 N 次成功、白名单外不重试、`maxRetries: 0` 旧行为、`Retry-After` 界内优先/超界直切、退避序列 500/1000/2000/4000/8000 |
-| `test/replay.test.mjs` | `restoreReplaySources`:路由不同 ⇒ 改写且 `content` 逐字未变、路由相同/无 `replayState`/形状不对 ⇒ 原样放行不抛、非助手消息不动、多条各按自己的 replay 路由改写、冻结输入不被破坏;外加一条接线用例:经 `AutoAdapter.stream()` 的嵌套请求确实拿到了改写后的 source。2026-09-28 起同文件再覆盖**跨路由思考摘除**(两侧同步摘、只摘一侧 ⇒ 等长校验失败的反例、摘空 ⇒ 整条去掉、信封对不齐 ⇒ 丢 `replayState`、同路由零改动、anthropic 的 `responseModel` 重建规则)与**路由切换通知**(切换才追加、已有覆盖通知不重复、标签规则、只进嵌套请求),共 49 例;全套 **184 例**(改动前 144 例) |
+| `test/replay.test.mjs` | `restoreReplaySources`:路由不同 ⇒ 改写且 `content` 逐字未变、路由相同/无 `replayState`/形状不对 ⇒ 原样放行不抛、非助手消息不动、多条各按自己的 replay 路由改写、冻结输入不被破坏;外加一条接线用例:经 `AutoAdapter.stream()` 的嵌套请求确实拿到了改写后的 source。2026-09-28 起同文件再覆盖**跨路由思考摘除**(两侧同步摘、只摘一侧 ⇒ 等长校验失败的反例、摘空 ⇒ 整条去掉、信封对不齐 ⇒ 丢 `replayState`、同路由零改动、anthropic 的 `responseModel` 重建规则)与**路由切换通知**(切换才追加、已有覆盖通知不重复、标签规则、只进嵌套请求),共 49 例;2026-10-01 起再覆盖**工具循环收尾**(三判据全中才追加、开关未开/末尾非工具结果/历史无断链消息各自不追加、坏形状不抛、与切换通知互斥、只在出站副本里);全套 **194 例**(改动前 144 例) |
 | `test/runtime-integration.test.mjs` | 用**真实** `LlmRuntime` + **真实** `@deepseek-ai/dsh-llm/invariant` 跑端到端:目录校验、回退后的流语法零违规、**重试后成功的流语法零违规**、`maxRetries: 0` 旧行为、聚合错误的终止分片、注销后路由立刻消失 |
 | `test/endpoint.test.mjs` | `apply()` 的注册/拒绝注册分支、`provider: auto` 跳过、HTTP 端点响应、`retry` 默认值/关闭/坏值回落;`compactWindow` 的映射/宿主形态/与 `contextWindow` 同时给出/非法回落/过小警告、**volatile 引用改值后不重启即生效**(name / compactWindow / logLimit)、端点复核字段 |
 | `test/calls.test.mjs` | `groupCalls`:坏输入、按 `call` 分组、同 attempt 合并(`tries`/最终失败/耗时求和/`switchedTo`)、三种 `outcome`、`order` 与 `maxCalls`、desc 按**请求结束**排序、没有 `call` 的旧记录降级分组 |
