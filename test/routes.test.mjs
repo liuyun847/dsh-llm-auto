@@ -134,3 +134,33 @@ describe('normalizeRoutes: keepThinking', () => {
     assert.ok(skipped.every((item) => /keepThinking/u.test(item.reason)))
   })
 })
+
+
+describe('normalizeRoutes: breakToolLoop', () => {
+  it('布尔值透传;非布尔值 warn 并回落缺省;与 keepThinking 互不影响', () => {
+    const { routes, skipped } = normalizeRoutes([
+      { provider: 'a', model: 'one', breakToolLoop: true },
+      { provider: 'b', model: 'two', breakToolLoop: false },
+      { provider: 'c', model: 'three', breakToolLoop: 'yes' },
+      { provider: 'd', model: 'four', keepThinking: true, breakToolLoop: true },
+    ])
+    assert.deepEqual(routes, [
+      { provider: 'a', model: 'one', breakToolLoop: true },
+      { provider: 'b', model: 'two', breakToolLoop: false },
+      { provider: 'c', model: 'three' },
+      { provider: 'd', model: 'four', keepThinking: true, breakToolLoop: true },
+    ])
+    assert.equal(skipped.length, 1)
+    assert.match(skipped[0].reason, /breakToolLoop/u)
+    assert.equal(skipped[0].index, 3)
+  })
+
+  it('两个开关各写各的:只写一个时另一个键不出现', () => {
+    const { routes } = normalizeRoutes([
+      { provider: 'a', model: 'one', keepThinking: true },
+      { provider: 'b', model: 'two', breakToolLoop: true },
+    ])
+    assert.deepEqual(Object.keys(routes[0]).sort(), ['keepThinking', 'model', 'provider'])
+    assert.deepEqual(Object.keys(routes[1]).sort(), ['breakToolLoop', 'model', 'provider'])
+  })
+})

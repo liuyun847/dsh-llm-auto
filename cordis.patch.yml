@@ -88,7 +88,7 @@
         routes:
           - { provider: opencode-go, model: deepseek-v4.1-flash }
           - { provider: commandcode, model: deepseek/deepseek-v4.1-flash-fast }
-          - { provider: deepseek-official, model: deepseek-flash, keepThinking: true } # DeepSeek thinking 模式要求工具循环逐条回传思考块
+          - { provider: deepseek-official, model: deepseek-flash, keepThinking: true, breakToolLoop: true } # keepThinking:思考要逐条回传;breakToolLoop:历史缺思考时把工具循环收尾(见 README §3)
         # 压缩点(默认值就是 500000,写出来只是显式化)
         # compactWindow: 500000
         # retry 不写 = 官方默认(每路由 5 次重试)。要关掉或改参数再放开下面:
