@@ -72,10 +72,11 @@
 # ⚠ `deepseek-official` 靠 DEEPSEEK_API_KEY 解析(本机在**用户级环境变量**里, 已实测有效);
 #   环境变量只在宿主启动时读入 ⇒ 宿主早于该变量设置而启动时该跳报 MISSING_CREDENTIAL, 重启即修。
 #
-# ── 链路与依据(2026-09-24 17:35 用户改定;2026-09-30 按用户要求摘掉 StepFun)──────
-#   OpenCode Go → Command Code → DeepSeek 官方。要点:
-#   · 首选与 agent-default-model 同源(都是 opencode-go),选不选 auto 行为一致。
-#   · Command Code 额度耗尽时每条都 QUOTA 400(不在瞬时白名单 ⇒ 一次败就切,代价仅这一次撞)。
+# ── 链路与依据(2026-09-24 17:35 用户改定;2026-09-30 按用户要求摘掉 StepFun;2026-10-04 按用户要求把 Command Code 提为首选,并把链首模型由 -fast 变体换成 deepseek/deepseek-v4.1-flash)──────
+#   Command Code → OpenCode Go → DeepSeek 官方。要点:
+#   · 链首 = commandcode / deepseek/deepseek-v4.1-flash(2026-10-04 起按用户要求不再用 -fast 变体);agent-default-model 现为 auto/auto ⇒ 默认即走本插件,选不选 auto 行为一致。
+#   · Command Code 额度耗尽时每条都 QUOTA 400(不在瞬时白名单 ⇒ 一次败就切,代价仅这一次撞);
+#     它现在排在首位 ⇒ 额度一旦为零,每条消息都会先在它身上撞一次 400,再切给 OpenCode Go。
 #   · 两条 DeepSeek Flash 的 model id **不同源**:opencode-go 那条不带 `deepseek/` 前缀,
 #     commandcode 那条带前缀。写错会以 UNKNOWN_MODEL 一次败就切,不报错也不停 ——
 #     改完务必看 GET /api/llm-auto/routes 的 chain 与命中记录。
@@ -86,8 +87,8 @@
       name: 'dsh-llm-auto'
       config:
         routes:
+          - { provider: commandcode, model: deepseek/deepseek-v4.1-flash }
           - { provider: opencode-go, model: deepseek-v4.1-flash }
-          - { provider: commandcode, model: deepseek/deepseek-v4.1-flash-fast }
           - { provider: deepseek-official, model: deepseek-flash, keepThinking: true, breakToolLoop: true } # keepThinking:思考要逐条回传;breakToolLoop:历史缺思考时把工具循环收尾(见 README §3)
         # 压缩点(默认值就是 500000,写出来只是显式化)
         # compactWindow: 500000

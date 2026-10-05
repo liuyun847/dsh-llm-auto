@@ -20,11 +20,11 @@
                     ┌─ 用户选了 auto/auto ─┐
    请求 ──► AutoAdapter.stream()
                     │
-                    ├─ 1) opencode-go/deepseek-v4.1-flash
+                    ├─ 1) commandcode/deepseek/deepseek-v4.1-flash
                     │      ├─ 第 1 次失败(SERVER 502) ──► 白名单内 ⇒ 退避 500ms 后原地重试
                     │      ├─ 第 2 次失败 ──────────────► 退避 1s 后原地重试 ……(默认最多重试 5 次)
                     │      └─ 重试耗尽 ────────────────┐
-                    ├─ 2) commandcode/deepseek/deepseek-v4.1-flash   ▼
+                    ├─ 2) opencode-go/deepseek-v4.1-flash   ▼
                     │      └─ 成功 ⇒ 分片原样透传给上层(前面各次的 usage 等协议分片已被丢弃)
                     └─ 3) deepseek-official/deepseek-flash   ──► (没轮到)
                     │
@@ -90,8 +90,8 @@ node <工作区>\dsh-plugin-manager\dshpm.mjs add file:./plugins/dsh-llm-auto --
       name: 'dsh-llm-auto'
       config:
         routes:
-          - { provider: opencode-go, model: deepseek-v4.1-flash }
           - { provider: commandcode, model: deepseek/deepseek-v4.1-flash }
+          - { provider: opencode-go, model: deepseek-v4.1-flash }
           - { provider: deepseek-official, model: deepseek-flash }
         # 压缩点(默认就是 500000,写出来只是显式化)
         compactWindow: 500000
@@ -212,8 +212,8 @@ slot(键 = **本包包名** `dsh-llm-auto`)⇒ 插件页 →「已安装」→ �
 按上面的顺序依次尝试;某条重试耗尽、或错误码不允许重试时,才静默切下一条。这里是只读视图。
 
 当前链(第一项即首选)
-1. opencode-go/deepseek-v4.1-flash
-2. commandcode/deepseek/deepseek-v4.1-flash
+1. commandcode/deepseek/deepseek-v4.1-flash
+2. opencode-go/deepseek-v4.1-flash
 3. deepseek-official/deepseek-flash
 每路由最多重试 5 次,退避 500ms→10000ms
 
