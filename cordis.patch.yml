@@ -13,7 +13,9 @@
 #      plugins.bundle.config（键 = **包名**）⇒ 插件页 →「已安装」→ 点开 dsh-llm-auto 卡片，
 #      官方 SettingsForm 表单就渲染在描述与行之间，不必再点二级页；行上那个「配置」控件随之消失。
 #      （只暴露 compactWindow 一个字段，暂存后保存才写入，带「已覆盖 / 恢复默认」。）
-#      表单经宿主 settings 服务写，只落 compactWindow 一个键；routes 原样不动。
+#      0.6.0 起同一张卡片还能**编辑 routes**(拖拽排序 / 从模型目录里选 / 逐条开关):同样经宿主
+#      settings 服务写入,落进 **profile 的 cordis.patch.yml** 里那一行 id: llm-auto 的 config.routes。
+#      compactWindow 与 routes 各带自己的 op(path 限定),一次保存里谁改了写谁,互不覆盖。
 #      其余改法仍然可用：手编 profile 的 cordis.patch.yml 追加按 id 覆写的顶层行
 #      `- id: llm-auto` + `name: 'dsh-llm-auto'` + `config: { routes: [...], compactWindow: N }`
 #      （profile 层在包层之后应用 ⇒ 该行遮蔽本文件的 insert），或经宿主 settings 服务写
@@ -31,19 +33,70 @@
 #   ~\.dsh\backups\bundle-migration-20260925\cordis.patch.yml.before。
 #
 # ── 配置键(全部可选,除 routes)────────────────────────────────────────────────
-#   routes        有序回退链;第一项即首选。每项 { provider, model },model 要写全
-#                 (profile 的 cordis.patch.yml 里的真实 id,例如 `xiaomi/mimo-v2.6-pro`,别省前缀)。
+#   routes        有序回退链;第一项即首选。每项 { provider, model, keepThinking?, breakToolLoop? },
+#                 model 要写全(provider 声明的真实 id,例如 `deepseek/deepseek-v4.1-flash`,别省前缀)。
+#                 ★ 0.6.0 起可在**插件页那张卡片的「回退链」面板**里直接编辑(拖拽排序、从 live
+#                   模型目录里选模型、按行开关两个选项)。写入走官方设置服务 ⇒ 落在 **profile 的
+#                   cordis.patch.yml** 里那一行 `- id: llm-auto` 的 config.routes 上(yaml 文档式写入,
+#                   本文件的注释不受影响);profile 层在包层之后应用 ⇒ 那一行会遮蔽下面这段 insert。
+#                   免重启生效:插件只持有 volatile 引用、每次要用时现取。
+#                   想回到本文件这条链:面板上点「恢复包内默认链」(= unset 掉 profile 的覆盖)。
+#                   该按钮**只在 profile 层确实覆盖了 routes 时才出现**(判据来自 /routes 响应的 user.routes)。
 #   compactWindow 压缩点(正整数 token,默认 500000):让自动压缩发生在这个数附近。
 #                 插件按 compaction-basic 的阈值算式反算对外宣称的窗口
 #                 (cw = max(ceil(T × 1.25), T + 65536);T = 500000 ⇒ cw = 625000),
 #                 于是压缩触发点从"声明窗口的 80%"变成你指定的 T。
 #                 ⚠ T < 12484 时引擎的"保留尾部 < 阈值"校验过不去,每轮抛
 #                   TargetPressureConfigError ⇒ 挂载时会另打一条 warn。
+#   quota         订阅额度查询(**只读观测**,不参与路由选择;0.7.0 起)。默认开。形状:
+#                   enabled      总开关(默认 true);false 时 /routes 的 quota.state = 'disabled'。
+#                   ttlMs        缓存窗口(毫秒,默认 60000):从"上次**尝试**"起算,成败都算 ——
+#                                网络坏时也不会每次请求都打上游。
+#                   timeoutMs    单个 HTTP 请求上限(毫秒,默认 8000),到点 AbortController 中止。
+#                                ⚠ 2026-10-05 实测 Command Code 的冷连接可达 2.3s ⇒ 4s 的旧默认
+#                                在本机会误报超时(查询是后台的,放宽不影响端点响应时间)。
+#                   userAgent    查询用的 UA(默认为浏览器 UA)。⚠ Command Code 那边是**签名黑名单**:
+#                                实测 node 默认 UA 也是 200,只有 Python-urllib 之类被拦(403 + 1010);
+#                                被拦会单独归类成 blocked(不是 auth),不是 key 无效。
+#                   commandcode  { apiKeyEnv: CMD_API_KEY }:引用名默认 CMD_API_KEY。
+#                   opencodeGo   { apiKeyEnv: OPENCODE_API_KEY }(也认 `opencode-go:` 这种写法)。
+#                 两条硬规矩:① 不可查的来源**一个数字都不给**(0 在两家都是合法真值,
+#                 拿它顶替会把 Go 的"已耗尽"显示成"0%");② 查询失败只体现在 quota 字段里,
+#                 /routes 的状态码恒 200。凭据值不外传,只回引用名与来源层。
 #   name          模型显示名,默认 `Auto`(选择器里出现的是 `Auto` 分组 + 这个模型名)。
 #   contextWindow 【旧键】直接声明对外宣称的上下文窗口(正整数);与 compactWindow 同时给出时
 #                 以 compactWindow 为准并被忽略(warn 会点名两者)。≤ 65536 时压缩引擎的
 #                 pressure budget ≤ 0,连阈值都算不出来 —— 这也是引入 compactWindow 的原因。
 #   logLimit      路由日志环形缓冲条数,默认 50(仅内存,重启即清空)。
+#   ordering      额度感知的路由行为(0.8.0 起,**volatile**:面板上那个开关写的就是它)。
+#                   mode  auto(默认) = ① 实际尝试顺序按"有月度重置时刻的订阅(越早重置越靠前)
+#                                       → 重置时刻未知的(按配置顺序) → 按量兜底(永远最后)"
+#                                       三桶排;② 某一跳因窗口额度耗尽被拒(错误码 QUOTA)时,
+#                                       **后台补查该来源的额度接口**(fire-and-forget,不阻塞本次
+#                                       请求),确认有**档位**耗尽(三档都看:Go 的 rolling/weekly/monthly,
+#                                       CC 的 5h 窗/周窗/**月度余额** —— 余额判据:credits.belowThreshold
+#                                       为真,或 monthly 与 total 两个键都在且都 <= 0;字段缺失=不知道,
+#                                       绝不当 0)⇒ 把该 provider 冷却到"被耗尽的那几档里最晚的重置
+#                                       时刻",期间它的**所有条目**一起跳过;到点自动恢复(不用定时器,
+#                                       每次请求重算时判 now >= until)。
+#                                       端点与面板会带回**是哪一档**(固定枚举 id:rolling / fiveHour /
+#                                       weekly / monthly / credits,面板显示成「5 小时 / 周 / 月度 /
+#                                       余额」),冷却行写「月度已耗尽,10-24 00:00 恢复」。
+#                         manual = 完全回到 0.7.0 行为:严格按 routes 顺序,不排序、不跳过、不冷却。
+#                         ⚠ 冷却表**不落盘**(进程内 Map,重启重算);最坏白撞一次,而 QUOTA 不在
+#                           重试白名单里 ⇒ 代价只是一次失败往返。
+#                         ⚠ 反应式:只在真的看到 QUOTA 报错后动作,不做请求前预判;AUTH
+#                           (例如 Go 的"余额不足")/ RATE_LIMIT / 其它码都**不触发**冷却。
+#                         ⚠ fail-open:补查本身失败(断网/超时/形状不认/401)⇒ **不冷却** ——
+#                           宁可下次白撞,也不因为一次查不到就误伤一条其实能用的订阅。
+#                           这一轮既然没查到,路由侧只记 **10 分钟**短闸门后重试;只有本轮真拿到
+#                           `status: ok` 才占长闸门(该家已知重置时刻 / 6 小时上界)。
+#                         ⚠ 触发点(§4):① 进程内第一次需要排序 ② 发生 QUOTA 报错(只查这一家、
+#                           绕缓存)③ 缓存过期。①③ 同挂在**每次请求的排序路径**上(适配器每请求
+#                           判一次,过期才查)⇒ headless(没人读 /routes)也照样补查;读端点那次
+#                           只是幂等地顺带推一下。只补查**真的过期**的那几家(链上查不到的来源
+#                           不该把别家的闸门顶穿),且都是 fire-and-forget、不阻塞任何请求。
+#                         ⚠ 排序**不改 routes 配置**:每次请求在快照上现算。
 #   retry         路由内重试策略,形状与官方 retryPolicy 相同(只支持 mode: 'normal'):
 #                   maxRetries      每路由最多重试几次(不含首次),默认 5(对齐官方 dsh-llm-retry);
 #                                  0 = 关闭重试,恢复"一次败就切"的旧行为。
@@ -56,13 +109,19 @@
 #
 # 导出 schemastery Config(0.3.0):本包导出 `Config`,于是配置进入宿主的设置服务
 #   (`SettingsForms.describe()` 只投影带 schema 的活动条目,且**只投影标了 `.volatile()` 的字段**)。
-#   name / contextWindow / compactWindow / logLimit 是 volatile ⇒ 经设置服务写入后原地生效、
-#   不必重启;routes / retry 是结构性配置,故意不标 volatile,仍改在本文件里。
+#   0.6.0 起 routes 也是 volatile(union 兜底坏形状)⇒ 面板里改完即时生效、不必重启;
+#   0.8.0 起 ordering 同样是 volatile(union 兜底 ⇒ 标量/数组/普通对象形态的坏值只 warn、回落 auto);
+#   仍是结构性配置的是 retry(apply() 一次性消费),以及 0.7.0 新增的 quota(只读观测,
+#   **刻意不标 volatile**:它不该出现在设置表单里,也不该被任何写入路径改到)。
 #   ⚠ **效果边界**:这一步只是"配置成为可编辑条目"(settings.describe 可见、settings.mutate 可写);
 #     随包发布的 Web 客户端还没有"按 schema 自动生成表单"的页面(dsh-settings README:
-#     "no shipped client does so yet"),本包也没有客户端 half ⇒ 别期待设置页自动多出表单。
+#     "no shipped client does so yet");本包**自带**客户端 half(0.4.0 起)并把"按 schema 自动
+#     生成表单"用 settings.configure({ auto: false }) 关掉,可编辑的表单只出现在插件页那张卡片上。
 #   ⚠ schema 是加载期校验:它对 routes/retry 用宽松类型(z.any,形状校验仍归插件自己),
 #     但把字符串写进数字键会让整行插件加载失败 —— 这是导出 Config 的代价,见插件 README §2。
+#   ⚠ 值里**不要写 `!!js` 标签、函数或类实例(RegExp / Date / Map);YAML 里未加引号的日期也会被
+#     解析成 Date**:这类"非普通值"在 schema 层就被拒 ⇒ **整行插件加载失败**。
+#     (标量 / 数组 / 普通对象才安全 —— routes / retry / quota / ordering 一视同仁。)
 #
 # ⚠ 不要把 provider 写成 `auto`:那是本插件自己的路由,自递归会在挂载时被 warn 并跳过。
 # ⚠ `opencode-go` 是 profile 的 cordis.patch.yml(键 llm-pi-ai.providers)里的通道:OpenCode Go 订阅,
@@ -77,6 +136,11 @@
 #   · 链首 = commandcode / deepseek/deepseek-v4.1-flash(2026-10-04 起按用户要求不再用 -fast 变体);agent-default-model 现为 auto/auto ⇒ 默认即走本插件,选不选 auto 行为一致。
 #   · Command Code 额度耗尽时每条都 QUOTA 400(不在瞬时白名单 ⇒ 一次败就切,代价仅这一次撞);
 #     它现在排在首位 ⇒ 额度一旦为零,每条消息都会先在它身上撞一次 400,再切给 OpenCode Go。
+#     ⚠ 0.8.0 起这条"每次都撞"有了终结者:第一次 QUOTA 之后插件会补查该来源额度并把它冷却到
+#       对应档位的重置时刻,期间不再尝试(见上面 ordering 那一段)。**CC 的"月度余额见底"也算
+#       一档**(5h/周窗可能都还没 exceeded):判据是 belowThreshold 为真、或 monthly 与 total
+#       两个键都在且都 <= 0 ⇒ 冷却到套餐 currentPeriodEnd,面板写「余额已耗尽」。
+#       **重启后的第一条消息仍会白撞一次**(冷却表是空的、额度可能还没查过)—— 那是设计行为,不是故障。
 #   · 两条 DeepSeek Flash 的 model id **不同源**:opencode-go 那条不带 `deepseek/` 前缀,
 #     commandcode 那条带前缀。写错会以 UNKNOWN_MODEL 一次败就切,不报错也不停 ——
 #     改完务必看 GET /api/llm-auto/routes 的 chain 与命中记录。

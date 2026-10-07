@@ -29,6 +29,9 @@ function build(scripts, options = {}) {
     // 测试不真等退避:默认"立刻等到"并记录延迟;要模拟取消的用例自己覆盖 sleep。
     sleep: options.sleep ?? (async (ms) => { delays.push(ms); return true }),
     random: options.random,
+    // 0.8.0:排序与失败回调都由宿主注入(adapter 不认识额度/排序);不传时是旧行为。
+    buildOrder: options.buildOrder,
+    onFailure: options.onFailure,
   })
   return { adapter, calls, ring, warnings, delays, routes }
 }
@@ -481,5 +484,131 @@ describe('0.5.2 DeepSeek keepThinking chain integration', () => {
   it('same chain without keepThinking strips reasoning by default', async () => {
     const { outgoing } = await run(undefined)
     assert.ok(outgoing.messages.filter((message) => message.role === 'assistant').every((message) => message.content[0].type === 'text'))
+  })
+})
+
+describe('额度感知排序 + 失败回调(0.8.0:buildOrder / onFailure)', () => {
+  /** 一个"反过来排 + 滤掉指定 provider"的 buildOrder 替身(宿主侧那套纯规则在 test/ordering.test.mjs 里测)。 */
+  const reverseOrder = (drop) => (routes) => ({
+    entries: routes.filter((route) => route.provider !== drop).slice().reverse(),
+    ignoredCooldown: false,
+  })
+
+  it('按 buildOrder 给的实际顺序尝试(不是配置顺序),模型名照旧带对', async () => {
+    const orderCalls = []
+    const { adapter, calls } = build(
+      { first: () => successScript('from first'), second: () => successScript('from second') },
+      { buildOrder: (routes) => { orderCalls.push(routes); return { entries: routes.slice().reverse(), ignoredCooldown: false } } },
+    )
+    const { chunks, thrown } = await drain(adapter.stream(request()))
+    assert.equal(thrown, undefined)
+    assert.deepEqual(calls.map((call) => `${call.provider}/${call.model}`), ['second/m2'], '实际顺序反过来了 ⇒ 先试 second')
+    assert.deepEqual(chunks, successScript('from second'))
+    assert.equal(orderCalls.length, 1, '一次请求只投影一次(快照)')
+    assert.deepEqual(orderCalls[0], [{ provider: 'first', model: 'm1' }, { provider: 'second', model: 'm2' }], '投影拿到的是配置链')
+  })
+
+  it('冷却中的 provider 一次都不被尝试,失败后按实际顺序切下一条', async () => {
+    const events = []
+    const { adapter, calls, ring } = build(
+      { first: () => successScript('from first'), second: () => [chunk.finishError('QUOTA', 'insufficient credits')], third: () => successScript('nope') },
+      {
+        routes: [{ provider: 'first', model: 'm1' }, { provider: 'second', model: 'm2' }, { provider: 'third', model: 'm3' }],
+        buildOrder: reverseOrder('third'),
+        onFailure: (event) => events.push(event.provider),
+      },
+    )
+    const { chunks, thrown } = await drain(adapter.stream(request()))
+    assert.equal(thrown, undefined)
+    assert.deepEqual(calls.map((call) => call.provider), ['second', 'first'], 'third 被滤掉 ⇒ 一次都不尝试;顺序取反 ⇒ second 在前')
+    assert.deepEqual(chunks, successScript('from first'))
+    assert.equal(ring.list()[0].attempt, 1, 'attempt 是实际顺序的序号')
+    assert.equal(ring.list()[0].provider, 'second')
+    assert.deepEqual(events, ['second'], '告吹的那一条按事实报给宿主')
+  })
+
+  it('buildOrder 缺席 / 返回坏东西 / 抛错 ⇒ 一律退化成配置顺序(绝不少试一跳)', async () => {
+    for (const buildOrder of [undefined, () => ({ entries: [] }), () => ({ entries: 'nope' }), () => { throw new Error('boom') }]) {
+      const { adapter, calls, warnings } = build(
+        { first: () => [chunk.finishError('NO_ADAPTER', 'nope')], second: () => successScript('ok') },
+        { buildOrder },
+      )
+      const { thrown } = await drain(adapter.stream(request()))
+      assert.equal(thrown, undefined, `${buildOrder} ⇒ 仍能回退到 second`)
+      assert.deepEqual(calls.map((call) => call.provider), ['first', 'second'])
+      if (buildOrder !== undefined && typeof buildOrder === 'function' && buildOrder.toString().includes('throw')) {
+        assert.ok(warnings.some((warning) => /排序失败/u.test(warning)), '排序抛错要留一条 warn')
+      }
+    }
+  })
+
+  it('每次"真的告吹"恰好回调一次 onFailure;重试过程中一次都不回调', async () => {
+    const events = []
+    const { adapter, calls } = build(
+      { first: () => [chunk.finishError('SERVER', 'boom', 502)], second: () => successScript('ok') },
+      { onFailure: (event) => events.push(event) },
+    )
+    await drain(adapter.stream(request()))
+    assert.deepEqual(calls.map((call) => call.provider), ['first', 'first', 'first', 'first', 'first', 'first', 'second'], 'SERVER 在白名单里 ⇒ 先重试 5 次')
+    assert.equal(events.length, 1, '前 5 次是可重试的失败,不算告吹')
+    assert.equal(events[0].provider, 'first')
+    assert.equal(events[0].failure.code, 'SERVER')
+    assert.equal(events[0].failure.status, 502)
+  })
+
+  it('QUOTA 失败:一次败就切,并把 {provider, failure} 报给 onFailure(宿主据此补查额度)', async () => {
+    const events = []
+    const { adapter, calls } = build(
+      { first: () => [chunk.finishError('QUOTA', 'Insufficient credits', 400)], second: () => successScript('from second') },
+      { onFailure: (event) => events.push(event) },
+    )
+    const { chunks, thrown } = await drain(adapter.stream(request()))
+    assert.equal(thrown, undefined)
+    assert.deepEqual(calls.map((call) => call.provider), ['first', 'second'], 'QUOTA 不在重试白名单 ⇒ 不白等退避')
+    assert.deepEqual(chunks, successScript('from second'))
+    assert.equal(events.length, 1)
+    assert.deepEqual(events[0].provider, 'first')
+    assert.equal(events[0].failure.code, 'QUOTA')
+    assert.match(events[0].failure.message, /Insufficient credits/u)
+  })
+
+  it('全部失败时也是逐条各回调一次(顺序 = 实际尝试顺序)', async () => {
+    const events = []
+    const { adapter } = build(
+      { first: () => [chunk.finishError('QUOTA', 'insufficient quota')], second: () => [chunk.finishError('QUOTA', 'usage limit reached')] },
+      { onFailure: (event) => events.push(event.provider) },
+    )
+    const { thrown } = await drain(adapter.stream(request()))
+    assert.equal(thrown.code, EXHAUSTED_CODE)
+    assert.deepEqual(events, ['first', 'second'])
+  })
+
+  it('onFailure 抛错 / 坏形状不影响请求(adapter 只报事实)', async () => {
+    const { adapter, warnings } = build(
+      { first: () => [chunk.finishError('QUOTA', 'insufficient credits')], second: () => successScript('ok') },
+      { onFailure: () => { throw new Error('hook exploded') } },
+    )
+    const { chunks, thrown } = await drain(adapter.stream(request()))
+    assert.equal(thrown, undefined)
+    assert.deepEqual(chunks, successScript('ok'))
+    assert.ok(warnings.some((warning) => /失败回调抛错/u.test(warning)))
+  })
+
+  it('已产出内容后失败 / 不可回退码:都不算"告吹",不回调 onFailure', async () => {
+    const committed = []
+    const { adapter: committedAdapter } = build(
+      { first: () => [chunk.text('half'), chunk.finishError('QUOTA', 'insufficient credits')] },
+      { routes: [{ provider: 'first', model: 'm1' }], onFailure: (event) => committed.push(event) },
+    )
+    await drain(committedAdapter.stream(request()))
+    assert.deepEqual(committed, [], '吐了内容之后不换路由,也就不该触发额度补查')
+
+    const never = []
+    const { adapter: neverAdapter } = build(
+      { first: () => [chunk.finishError('CONTEXT_WINDOW_EXCEEDED', 'too long')] },
+      { routes: [{ provider: 'first', model: 'm1' }], onFailure: (event) => never.push(event) },
+    )
+    await drain(neverAdapter.stream(request()))
+    assert.deepEqual(never, [], '不可回退的码直接上报,不是"告吹"')
   })
 })

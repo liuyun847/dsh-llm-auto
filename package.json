@@ -1,7 +1,7 @@
 {
   "name": "dsh-llm-auto",
-  "description": "DSH 宿主插件:注册一个 `auto` 模型路由,内部按配置的有序链依次尝试多条「provider + model」;某条在**产出任何内容之前**失败时,先按官方同款策略在该路由内原地重试(瞬时错误白名单,默认 5 次),重试耗尽才静默切下一条,对上层表现为一个普通模型;并可用 compactWindow 把自动压缩点钉在指定 token 数附近。0.4.0 起自带浏览器半侧:插件页该 bundle 的卡片上直接渲染配置表单,可直接改 compactWindow(官方 SettingsForm 原语,保存才写入)。0.5.0 起同一处再渲染只读「回退链」面板:当前生效链 + 最近若干次请求的真实回退过程(数据来自 /api/llm-auto/routes,打开页面时读一次、可手动刷新)。0.5.2 起:DeepSeek 原生路由可用 routes[i].keepThinking 保留工具循环思考,缺省仍摘;(B1/B2) 跨路由的历史思考改为从 content 与 replayState.blocks 同步摘掉,不再被上游降级成正文;(B) 真的发生静默路由切换时,在出站消息末尾追加一条与 DSH 自带同款的 model changed 通知(只改出站负载、不写会话记录)。0.5.3 起:新增 routes[i].breakToolLoop —— 历史里存在「带工具调用却没有思考块」的助手消息、且出站以工具结果结尾时,在出站消息末尾追加一条用户提示,把请求改成「以用户消息结尾」,绕开 DeepSeek thinking 模式的工具循环校验(这种情形下思考是「从来没有」,keepThinking 挡不住)。",
-  "version": "0.5.3",
+  "description": "DSH 宿主插件:注册一个 `auto` 模型路由,内部按配置的有序链依次尝试多条「provider + model」;某条在**产出任何内容之前**失败时,先按官方同款策略在该路由内原地重试(瞬时错误白名单,默认 5 次),重试耗尽才静默切下一条,对上层表现为一个普通模型;并可用 compactWindow 把自动压缩点钉在指定 token 数附近。0.4.0 起自带浏览器半侧:插件页该 bundle 的卡片上直接渲染配置表单,可直接改 compactWindow(官方 SettingsForm 原语,保存才写入)。0.5.0 起同一处再渲染只读「回退链」面板:当前生效链 + 最近若干次请求的真实回退过程(数据来自 /api/llm-auto/routes,打开页面时读一次、可手动刷新)。0.5.2 起:DeepSeek 原生路由可用 routes[i].keepThinking 保留工具循环思考,缺省仍摘;(B1/B2) 跨路由的历史思考改为从 content 与 replayState.blocks 同步摘掉,不再被上游降级成正文;(B) 真的发生静默路由切换时,在出站消息末尾追加一条与 DSH 自带同款的 model changed 通知(只改出站负载、不写会话记录)。0.5.3 起:新增 routes[i].breakToolLoop —— 历史里存在「带工具调用却没有思考块」的助手消息、且出站以工具结果结尾时,在出站消息末尾追加一条用户提示,把请求改成「以用户消息结尾」,绕开 DeepSeek thinking 模式的工具循环校验(这种情形下思考是「从来没有」,keepThinking 挡不住)。0.6.0 起:routes 成为可写配置,插件页那张卡片上的「回退链」面板升级成可编辑 —— 拖拽排序、从 live 模型目录(新增 GET /api/llm-auto/catalog)里选模型、按行开关 keepThinking/breakToolLoop;写入走官方设置服务落进 profile 的 cordis.patch.yml(注释保留),靠懒读 volatile 引用免重启生效。0.7.0 起:同一张卡片上再多一段**只读**的「额度」摘要 —— 链上两家订阅的余额/窗口用量(Command Code 的美元余额 + 5h/周窗口,OpenCode Go 的 5h/周/月三档百分比),数据来自 /api/llm-auto/routes 新增的 quota 字段;宿主侧只读查询、按 TTL 缓存、永不因此改变端点状态码,**查不到就显示「不可查」而不是 0**;同一个响应里还在确有 profile 覆盖时多一个 user.routes,让面板的「恢复包内默认链」按钮终于有判据可依。0.8.0 起:回退链的顺序改由插件**按订阅额度自动决定** —— 有月度重置时刻的订阅按「越早重置越靠前」排,查不到重置时刻的按配置顺序,永不过期的按量兜底排最后;某一跳因窗口额度耗尽被拒(错误码 QUOTA)时,插件补查该来源的额度接口,确认后把它冷却到对应窗口的重置时刻、期间不再尝试,到点自动恢复(进程内冷却表,不落盘)。新增 volatile 配置键 ordering.mode(auto 默认 / manual = 回到 0.7.0 的「完全按 routes 顺序」),插件页那张卡片上多一段「自动排序」摘要与开关;/routes 响应新增只读字段 ordering(effective 实际尝试顺序 + cooldown 冷却表),chain 仍是配置顺序。0.9.0 起:插件页那张卡片的界面**按排序模式收敛** —— 模式开关(自动/手动)挪到卡片最上面、在「回退链」标题之前;自动模式下主视图是「生效顺序」(插件排出来的实际尝试顺序),可编辑的配置链折进默认收起的「配置顺序」折叠项(点开照旧可拖可改),提示语也换成「自动排序生效中」那句;手动模式下主视图就是那条可编辑的链,不画生效顺序。",
+  "version": "0.9.0",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
@@ -34,6 +34,14 @@
     "test": "node --test \"test/*.test.mjs\""
   },
   "license": "MIT",
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "cordis",
+    "plugin",
+    "llm-router",
+    "model-fallback"
+  ],
   "repository": {
     "type": "git",
     "url": "https://github.com/liuyun847/dsh-llm-auto.git"

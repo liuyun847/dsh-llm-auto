@@ -6,7 +6,7 @@
  * 形状不对 ⇒ 原样不抛、`content` 与其它字段逐字未变;外加逐条独立取值、非助手消息不动、
  * 冻结输入不被破坏。
  *
- * 第二批(2026-09-28 修法 A,清单见设计阶段的 16 条用例):
+ * 第二批(2026-09-28 修法 A,清单见 `auto-route-capture/FIX-A-DESIGN.md` §4.2 的 16 条):
  * 跨路由 ⇒ `content` 与 `replayState.blocks` **同步**摘 reasoning、摘后 `replayedAssistant`
  * 的四条校验仍过(含"只摘一侧 ⇒ 等长校验失败"的反例)、正文与工具调用块一个不动、redacted
  * 思考同样摘、信封对不齐 ⇒ 摘 content 并丢整个 replayState、摘空 ⇒ 整条消息去掉、同路由零改动、
@@ -83,7 +83,7 @@ const REASONING_THEN_TEXT = Object.freeze([Object.freeze({ type: 'reasoning' }),
  * `dsh-llm-pi-ai` 的 `replayedAssistant` 校验复刻(`lib/index.js:185`/`:186`/`:187`/`:192`)。
  *
  * 为什么要复刻:真函数没有导出,而这四条校验正是"必须两侧同步摘"的**全部**理由 ——
- * 把设计阶段 §2.5 的推导钉成回归,比只断言"块数变少了"结实得多。
+ * 把 FIX-A-DESIGN.md §2.5 的推导钉成回归,比只断言"块数变少了"结实得多。
  * 错误描述与上游逐字同款,便于对照宿主日志里的 `llm-pi-ai: unusable replay state`。
  *
  * @param message - 待校验的历史助手消息。

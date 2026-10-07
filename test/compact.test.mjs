@@ -217,15 +217,19 @@ describe('describeWindowPlan:挂载日志里必须带上所依赖的假设', () 
 })
 
 describe('导出的 Config:设置页可编辑性 + 宽松策略', () => {
-  /** 取出 schema 的根节点(toJSON 是"引用图",不是嵌套树)。 */
+  /**
+   * 取出 schema 的根节点(toJSON 是"引用图",不是嵌套树)。
+   * @returns `{ json, root, live }` —— `json`/`root` 是设置页看到的那份,
+   *   `live` 是活 schema 本身(要看某个字段的**类型结构**时用它:toJSON 只留 meta)。
+   */
   function schemaRoot() {
     const json = Config.toJSON()
-    return { json, root: json.refs[json.uid] }
+    return { json, root: json.refs[json.uid], live: Config }
   }
 
-  it('六个键都在,且每个都带中文 description(设置页唯一的说明来源)', () => {
+  it('八个键都在,且每个都带中文 description(设置页唯一的说明来源)', () => {
     const { json, root } = schemaRoot()
-    assert.deepEqual(Object.keys(root.dict).sort(), ['compactWindow', 'contextWindow', 'logLimit', 'name', 'retry', 'routes'])
+    assert.deepEqual(Object.keys(root.dict).sort(), ['compactWindow', 'contextWindow', 'logLimit', 'name', 'ordering', 'quota', 'retry', 'routes'])
     for (const [key, ref] of Object.entries(root.dict)) {
       const meta = json.refs[ref].meta
       assert.equal(typeof meta.description, 'string', `${key} 缺 description`)
@@ -234,26 +238,60 @@ describe('导出的 Config:设置页可编辑性 + 宽松策略', () => {
     }
   })
 
-  it('compactWindow 默认 500000 且标了 volatile(不标就不会出现在设置页表单里)', () => {
-    const { json, root } = schemaRoot()
+  it('可写字段:compactWindow / name / contextWindow / logLimit / routes / ordering 都标了 volatile;retry 仍是结构性键', () => {
+    const { json, root, live } = schemaRoot()
     const node = json.refs[root.dict.compactWindow]
     assert.equal(node.type, 'number')
     assert.equal(node.meta.default, DEFAULT_COMPACT_WINDOW)
     assert.equal(node.meta.volatile, true)
-    for (const key of ['name', 'contextWindow', 'logLimit']) {
-      assert.equal(json.refs[root.dict[key]].meta.volatile, true, `${key} 应为 volatile`)
+    for (const key of ['name', 'contextWindow', 'logLimit', 'routes', 'ordering']) {
+      assert.equal(json.refs[root.dict[key]].meta.volatile, true, `${key} 应为 volatile(插件页/设置服务要能改它)`)
     }
-    for (const key of ['routes', 'retry']) {
-      assert.equal(json.refs[root.dict[key]].meta.volatile, undefined, `${key} 是结构性键,不该标 volatile`)
-    }
+    // v0.6.0 起 routes 也进来了:链可以在插件页里编辑。retry 仍是 apply() 一次性消费的结构性配置。
+    assert.equal(json.refs[root.dict.retry].meta.volatile, undefined, 'retry 是结构性键,不该标 volatile')
+    // v0.7.0 的 quota 同样刻意不标 volatile:它是"只读观测",不进设置表单、也不给任何写入路径
+    assert.equal(json.refs[root.dict.quota].meta.volatile, undefined, 'quota 是只读观测,不该标 volatile')
+    assert.equal(live.dict.routes.type, 'union', 'routes 是 union(array | any):既要可写,又要坏形状不拒绝加载')
+    assert.deepEqual(live.dict.routes.list.map((member) => member.type), ['array', 'any'], '第一个成员给形状,第二个成员兜底放行')
+    assert.equal(live.dict.routes.meta.volatile, true, 'union 自己带 volatile(写路径要求),成员不带')
+    // v0.8.0 的 ordering **必须** volatile(面板那个「自动排序」开关要免重启生效),
+    // 而且照 0.6.0 的教训用 union 兜底坏形状 —— 坏值只 warn,绝不让整行插件加载失败。
+    assert.equal(live.dict.ordering.type, 'union', 'ordering 是 union(object | any)')
+    assert.deepEqual(live.dict.ordering.list.map((member) => member.type), ['object', 'any'], '第一个成员给形状,第二个成员兜底放行')
+    assert.equal(live.dict.ordering.meta.volatile, true, 'ordering 必须 volatile(面板要能免重启切换模式)')
   })
 
-  it('宽松策略:routes/retry 坏值、未知键都不会让校验失败;数值字段的类型错才会', () => {
+  it('宽松策略:routes / ordering 坏值、retry 坏值、未知键都不会让校验失败;数值字段的类型错才会', () => {
     const validate = (value) => Config['~standard'].validate(value)
-    const loose = validate({ routes: 'not-an-array', retry: 'nope', unknownKey: 1 })
+    const loose = validate({ routes: 'not-an-array', retry: 'nope', quota: 'nope', ordering: 'nope', unknownKey: 1 })
     assert.equal(loose.issues, undefined, 'routes/retry 的坏形状必须留给 normalizeRoutes/normalizeRetry')
-    assert.equal(loose.value.routes, 'not-an-array')
+    // routes 是 union 且有 .volatile() ⇒ 拿到的同样是引用,解包后是原样放行的坏形状
+    assert.equal(unwrapVolatile(loose.value.routes), 'not-an-array', 'union 的兜底成员(z.any)原样放行')
     assert.equal(loose.value.unknownKey, 1, '未知键原样保留(不会被剥掉)')
+    assert.equal(unwrapVolatile(loose.value.quota), 'nope', 'quota 的坏形状也只 warn(由 normalizeQuota 处理)')
+    // ⚠ 0.8.0 的重点:ordering 是 volatile 的 union ⇒ 坏值(字符串 / 数组 / mode 不是字符串)
+    //   一律只 warn 回落 auto,**不能让整行插件加载失败**(schema 是加载期校验)。
+    assert.equal(unwrapVolatile(loose.value.ordering), 'nope', 'ordering 的坏形状原样放行')
+    assert.equal(validate({ ordering: { mode: 'bogus' } }).issues, undefined)
+    assert.equal(validate({ ordering: [] }).issues, undefined)
+  })
+
+  it('ordering 经真 schema 走一遍:mode 收窄成字符串,缺省时解包是 undefined(由 normalizeOrdering 补 auto)', () => {
+    const validate = (value) => Config['~standard'].validate(value)
+    const typed = validate({ routes: [{ provider: 'a', model: 'b' }], ordering: { mode: 'manual' } })
+    assert.equal(typed.issues, undefined)
+    assert.deepEqual(unwrapVolatile(typed.value.ordering), { mode: 'manual' })
+    const unset = validate({ routes: [{ provider: 'a', model: 'b' }] })
+    assert.equal(unset.issues, undefined)
+    assert.equal(unwrapVolatile(unset.value.ordering), undefined, '没给 ⇒ undefined(插件侧 normalizeOrdering 补 auto)')
+
+    // 形状对时走 union 的第一个成员(array + 字段类型收窄):这一支是插件页写入路径要的
+    const routesTyped = validate({ routes: [{ provider: 'a', model: 'b', keepThinking: true }] })
+    assert.equal(routesTyped.issues, undefined)
+    assert.deepEqual(unwrapVolatile(routesTyped.value.routes), [{ provider: 'a', model: 'b', keepThinking: true }])
+    // ⚠ 第一个成员的字段类型**不**兜底:provider 写成数字会落到 z.any 那一支(与"坏形状只 warn"一致)
+    assert.equal(validate({ routes: [{ provider: 1, model: 'b' }] }).issues, undefined)
+
     // 数值字段保持"是数字"这一条(设置页据此渲染数字输入框):类型错会失败,这点写进 README
     assert.ok(validate({ compactWindow: 'abc' }).issues !== undefined)
     assert.equal(validate({ compactWindow: -5 }).issues, undefined, '负数不是 schema 的活,交给 planDeclaredWindow warn + 回落')
